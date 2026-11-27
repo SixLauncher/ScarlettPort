@@ -1,7 +1,8 @@
 name: Release
 
-# On a tag v*: build the launcher and the ScarlettPort runtime, assemble the ZIP
-# (top level: ScarlettPort.exe, the runtime\ folder, README.txt and LICENSE.md only), write SHA-256 checksums and publish a release.
+# On a tag v*: build the ScarlettPort runtime, assemble the ZIP (top level: scarlett.exe, its
+# D3D12\ folder, SCARLETT_COMMIT.txt, README.txt and the licences), write SHA-256 checksums and
+# publish a release. Players run it through SixLauncher (https://github.com/SixLauncher/launcher).
 # No binaries are committed to the repository.
 
 on:
@@ -25,15 +26,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            launcher
-            engine
-
-      - name: Build the launcher
-        working-directory: launcher
-        run: |
-          cargo build --release --locked
-          cargo test --release --locked
+          workspaces: engine
 
       # engine/rust-toolchain.toml pins its toolchain; rustup installs it on first use.
       - name: Build the ScarlettPort runtime
@@ -54,40 +47,36 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $root = Join-Path $env:RUNNER_TEMP "ScarlettPort-$tag"
-          $rt = Join-Path $root 'runtime'
-          New-Item -ItemType Directory -Force (Join-Path $rt 'D3D12') | Out-Null
-          Copy-Item launcher\target\release\ScarlettPort.exe $root
-          Copy-Item engine\target\release\scarlett.exe (Join-Path $rt 'ScarlettPort-Runtime.exe')
-          Copy-Item "$env:AGILITY_BIN\D3D12Core.dll" (Join-Path $rt 'D3D12')
-          Copy-Item "$env:AGILITY_BIN\d3d12SDKLayers.dll" (Join-Path $rt 'D3D12')
+          New-Item -ItemType Directory -Force (Join-Path $root 'D3D12') | Out-Null
+          Copy-Item engine\target\release\scarlett.exe $root
+          Copy-Item "$env:AGILITY_BIN\D3D12Core.dll" (Join-Path $root 'D3D12')
+          Copy-Item "$env:AGILITY_BIN\d3d12SDKLayers.dll" (Join-Path $root 'D3D12')
           Copy-Item LICENSE.md $root
-          Copy-Item engine\LICENSE (Join-Path $rt 'LICENSE-runtime.txt')
-          Copy-Item engine\UPSTREAM.md (Join-Path $rt 'UPSTREAM.md')
-          Copy-Item CREDITS.md $rt
+          Copy-Item engine\LICENSE (Join-Path $root 'LICENSE-runtime.txt')
+          Copy-Item engine\UPSTREAM.md (Join-Path $root 'UPSTREAM.md')
+          Copy-Item CREDITS.md $root
+          "${{ github.sha }}" | Set-Content (Join-Path $root 'SCARLETT_COMMIT.txt')
           @"
-          ScarlettPort $tag
+          ScarlettPort $tag: the runtime (scarlett.exe) and the D3D12 Agility SDK it loads from D3D12\.
 
-          Install:
-          1. Download the ZIP.
-          2. Right-click it, then Extract All.
-          3. Open the extracted folder (keep ScarlettPort.exe and the runtime folder together).
-          4. Run ScarlettPort.exe. It finds your game folder and prepares the shaders once.
+          Play with SixLauncher (https://github.com/SixLauncher/launcher): choose ScarlettPort as the
+          backend and this folder's scarlett.exe as its executable, or let SixLauncher install a build.
+          Keep the D3D12 folder beside scarlett.exe.
 
           You need your own dump of your own legally obtained copy; no game files are included.
           Source and instructions: https://github.com/${{ github.repository }}
           "@ | Set-Content (Join-Path $root 'README.txt')
           $files = Get-ChildItem $root -Recurse -File | Sort-Object FullName
           $sums = $files | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.FullName.Substring($root.Length + 1).Replace('\', '/') }
-          $sums | Set-Content (Join-Path $rt 'SHA256SUMS.txt')
+          $sums | Set-Content (Join-Path $root 'SHA256SUMS.txt')
           $zip = "ScarlettPort-$tag-win64.zip"
           Compress-Archive -Path "$root\*" -DestinationPath $zip
           $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
           "$zipHash  $zip" | Set-Content SHA256SUMS.txt
           $sums | Add-Content SHA256SUMS.txt
-          $exeHash = (Get-FileHash (Join-Path $root 'ScarlettPort.exe') -Algorithm SHA256).Hash.ToLower()
-          $vicHash = (Get-FileHash (Join-Path $rt 'ScarlettPort-Runtime.exe') -Algorithm SHA256).Hash.ToLower()
+          $exeHash = (Get-FileHash (Join-Path $root 'scarlett.exe') -Algorithm SHA256).Hash.ToLower()
           @"
-          One ZIP: ``ScarlettPort.exe`` (the launcher) and a ``runtime\`` folder beside it holding ``ScarlettPort-Runtime.exe`` (the World engine: the ScarlettPort runtime, GPL-3.0; lineage in UPSTREAM.md) and the Microsoft D3D12 Agility SDK DLLs. Extract the whole ZIP and keep the two side by side. Nothing is unpacked or installed at run time; an update downloads only when you click it (Settings, Options), is checked against SHA256SUMS.txt and is used from the next start. You need your own dump of your own legally obtained copy; no game files are included.
+          One ZIP: ``scarlett.exe`` (the ScarlettPort runtime, GPL-3.0; lineage in UPSTREAM.md) and the Microsoft D3D12 Agility SDK DLLs in ``D3D12\`` beside it. Extract the whole ZIP and keep the two together. Play it with [SixLauncher](https://github.com/SixLauncher/launcher): choose ScarlettPort as the backend and this ``scarlett.exe``, then **Preparar shaders** once. You need your own dump of your own legally obtained copy; no game files are included.
 
           Built from ``${{ github.sha }}`` by the [Release workflow](https://github.com/${{ github.repository }}/actions/workflows/release.yml).
 
@@ -95,7 +84,7 @@ jobs:
           What changed is listed under this version's "New in" section of the README.
 
           ### Shader build
-          The first run finds your game folder, then prepares the shader cache on all cores (phase, time left, Pause/Resume, or play now with live compiling). It is keyed on the engine's shader-translator fingerprint and your graphics driver, so an update that does not change the translator needs no preparation, and one that does only translates what is new. See the README FAQ if a build looks stuck.
+          ``scarlett prepare`` (SixLauncher's **Preparar shaders**) translates every shader and makes the pipelines earlier runs recorded, on all cores but one; it resumes where it stopped. An update that does not change the translator only re-checks the cache; one that does translates what is new.
 
           ### Verify the download
           These files are **not code-signed**, so Windows SmartScreen may warn on first run ("More info", then "Run anyway"). Compare the SHA-256 before running:
@@ -103,8 +92,7 @@ jobs:
           | File | SHA-256 |
           |---|---|
           | ``$zip`` | ``$zipHash`` |
-          | ``ScarlettPort.exe`` | ``$exeHash`` |
-          | ``runtime/ScarlettPort-Runtime.exe`` | ``$vicHash`` |
+          | ``scarlett.exe`` | ``$exeHash`` |
 
           ``SHA256SUMS.txt`` lists every file. In PowerShell: ``Get-FileHash .\$zip -Algorithm SHA256``.
 

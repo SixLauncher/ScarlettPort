@@ -38,26 +38,18 @@ Tests that do not need a GPU: `cargo test --release --locked --lib -p scarlett-c
 
 Windows 10 needs the D3D12 Agility SDK (1.614.1) next to the executable, in a `D3D12` folder containing `D3D12Core.dll` and `d3d12SDKLayers.dll`. `setup-scarlett.ps1` downloads it from NuGet (`Microsoft.Direct3D.D3D12`) into `engine\target\release\D3D12`. To do it by hand, download the package, unzip it, and copy both DLLs from `build\native\bin\x64`. Do not commit these DLLs.
 
-## Launcher
+## Playing a build
 
-The launcher embeds no runtime. It runs the engines from a `runtime` folder beside `ScarlettPort.exe` (`scarlett.exe` plus its `D3D12\` folder; optionally `xcl.exe`, `dxcompiler.dll` and `dxil.dll` for the Classic engine). It never unpacks, downloads or writes executables.
+ScarlettPort has no launcher of its own any more: [SixLauncher](https://github.com/SixLauncher/launcher) runs `scarlett.exe` (choose the ScarlettPort backend and, under Custom, `engine\target\release\scarlett.exe` with its `D3D12` folder beside it). `scripts\play-scarlett.ps1` still runs a build directly.
 
-```powershell
-cd launcher
-cargo build --release --locked
-cargo test --release --locked
-```
+Releases are built by `.github/workflows/release.yml` on a `v*` tag: the ScarlettPort runtime in release mode, the Agility SDK from NuGet, a ZIP with `scarlett.exe`, `D3D12\` and `SCARLETT_COMMIT.txt`, and SHA-256 checksums. No binaries are committed.
 
-To run a development build, either copy `engine\target\release\scarlett.exe` and its `D3D12` folder into `launcher\target\release\runtime\`, or set `SCARLETT_RUNTIME_DIR` to a folder holding them. `ScarlettPort.exe --screenshot=FILE.png` renders the window to a PNG and exits.
-
-Releases are built by `.github/workflows/release.yml` on a `v*` tag: launcher and ScarlettPort runtime in release mode, the Agility SDK from NuGet, a ZIP with `ScarlettPort.exe` and `runtime\`, and SHA-256 checksums. No binaries are committed.
 ## Where things live
 
 | What | Where |
 |---|---|
-| Build output | `runtime\xcl\target`, `engine\target`, `launcher\target` |
-| Launcher engines | `runtime\` beside `ScarlettPort.exe` |
-| Launcher settings and default cache | `%LOCALAPPDATA%\ScarlettPort`, cache on the fixed drive with the most free space (`<drive>\ScarlettCache`) |
+| Build output | `runtime\xcl\target`, `engine\target` |
+| Runtime data and cache (no switches set) | `%LOCALAPPDATA%\ScarlettPort\data` and `\cache`; SixLauncher sets `SCARLETT_DATA_DIR` and `SCARLETT_CACHE_DIR` to its own folders |
 | Shader caches | `<cache>\scarlett` (World), `<cache>\dxil` (Classic); build progress in `<cache>\build-world.json` / `build-classic.json` |
 | XCL title data, pipeline journal | `%XCL_DATA_ROOT%` or `%LOCALAPPDATA%\XCL`, then the package name; `cache\pipelines.bin` inside it |
 

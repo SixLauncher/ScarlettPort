@@ -11,7 +11,7 @@ AI coding agents are welcome. The rules are the same for code written by hand an
 5. **Keep upstream licenses and credits** in `runtime/xcl` and `engine`.
 6. **One author per commit.** Commit messages must not contain `Co-Authored-By` trailers; CI rejects them. The author of a commit is the person who takes responsibility for it and who the license and history attribute it to, so a commit has exactly one. Credit others in the PR description instead.
 
-CI (`.github/workflows/ci.yml`) also checks that no `.exe`, `.dll`, `.pdb`, `.rpf` or file over 2 MB is tracked, that `scripts/*.ps1` parse, and that the runtimes and launcher build. Build instructions: [docs/BUILDING.md](docs/BUILDING.md). Direction: [docs/ROADMAP.md](docs/ROADMAP.md).
+CI (`.github/workflows/ci.yml`) also checks that no `.exe`, `.dll`, `.pdb`, `.rpf` or file over 2 MB is tracked, that `scripts/*.ps1` parse, and that the runtimes build. Build instructions: [docs/BUILDING.md](docs/BUILDING.md). Direction: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## PR description
 

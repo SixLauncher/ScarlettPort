@@ -27,7 +27,7 @@ the reverse of the old helper — it is called once at startup from
 
 ## 1-2. What was fixed, and why it mattered
 
-`launcher/src/presets.rs:37-56` defines `CAND4`, the 18 live engine settings;
+`launcher/src/presets.rs (now SixLauncher's crates/core/src/scarlett.rs):37-56` defines `CAND4`, the 18 live engine settings;
 `launcher/src/presets.rs:105-120` (`stable_env`) and `engine/Play-ScarlettPort.cmd:18-38`
 apply them. Before `1f99d77`, `play-scarlett.ps1` applied ~19 names that no 0.4.6+ engine
 reads (`SCARLETT_PRECOMPILED_GRAPHICS`, `SCARLETT_READFIX`, `SCARLETT_SYNC_PRECISE`,

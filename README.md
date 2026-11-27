@@ -2,7 +2,7 @@
 
 # ScarlettPort
 
-**Run your own Xbox Series X|S dump on a Windows PC. Its own runtime, its own launcher.**
+**Run your own Xbox Series X|S dump on a PC. Its own runtime, played through [SixLauncher](https://github.com/SixLauncher/launcher).**
 
 <a href="https://github.com/ZigZagBoi1/ScarlettPort"><img src="https://img.shields.io/github/stars/ZigZagBoi1/ScarlettPort?style=flat&logo=github&label=stars&color=ffd700" alt="GitHub stars"></a>
 <a href="https://github.com/ZigZagBoi1/ScarlettPort/releases/latest"><img src="https://img.shields.io/github/v/release/ZigZagBoi1/ScarlettPort?style=flat&label=release" alt="Latest release"></a>
@@ -122,10 +122,11 @@ Hardware reports from testers. These are **their own measurements**, not ours.
 
 ## Install
 
-1. Download `ScarlettPort-<version>-win64.zip` from [Releases](https://github.com/ZigZagBoi1/ScarlettPort/releases).
-2. Right-click the ZIP, **Extract All** (keep `ScarlettPort.exe` and the `runtime` folder side by side).
-3. Run `ScarlettPort.exe`.
-4. Pick your game folder. It prepares shaders once, then press **Play**.
+ScarlettPort no longer ships a launcher of its own: [SixLauncher](https://github.com/SixLauncher/launcher) runs it (Windows natively, Linux through Proton), with the same presets, shader preparation, features and save backups.
+
+1. Install [SixLauncher](https://github.com/SixLauncher/launcher/releases).
+2. In **Compatibilidade**, pick the ScarlettPort build (or **Custom** and the `scarlett.exe` of a `ScarlettPort-<version>-win64.zip` from [Releases](https://github.com/ZigZagBoi1/ScarlettPort/releases), extracted with its `D3D12` folder beside it).
+3. Pick your game folder (or **Procurar no computador**), press **Preparar shaders** once, then **Jogar**.
 
 **Requirements**
 
@@ -184,9 +185,7 @@ Hardware reports from testers. These are **their own measurements**, not ours.
 | Frame generation | 📋 planned | only once the base frame rate is high enough for it to make sense |
 | Save safety | 🧪 in testing | protects your save folder from being overwritten by test runs |
 | One-command benchmark queue | 🧪 in testing | queues A/B runs of switch sets and collects the frame-time logs in one command |
-| Launcher: Controller line | 🧪 in testing | the Play page shows a connected Xbox pad or PlayStation pad (DualShock 4, DualSense, Edge); PlayStation pads are read natively over USB (`SCARLETT_PAD_PS`) |
-| Launcher: Prepare shaders | 🧪 in testing | `scarlett shaders` translates every shader, then `scarlett warm` makes the pipelines earlier runs recorded at low priority, with progress and Stop/resume, so moving in the world does not stutter on first use |
-| Launcher: drive note | 🧪 in testing | Settings says to keep the game folder on an internal NVMe/SSD for load times |
+| SixLauncher: Preparar shaders | 🧪 in testing | `scarlett prepare` translates every shader, then makes the pipelines earlier runs recorded, with progress and Stop/resume, so moving in the world does not stutter on first use |
 
 ### Task board: grab one, send a PR
 
@@ -222,7 +221,6 @@ Every task is sized for **one contributor**. Pick one, comment on its issue to c
 - [ ] **Look preset A/B.** New in 0.4.4 and not yet measured: run Stable and Look (`SCARLETT_LOOK=1`, `SCARLETT_SHADER_FIXES=1`) in the same scene and report fps and what the picture gains or loses.
 - [x] **#8 One-click launcher** for the ScarlettPort runtime (done: it is the launcher's default engine).
 - [x] **Launcher 0.4.1.** Done: Controller line on the Play page, the Prepare shaders step, the NVMe/SSD note, and the Stable preset matched to the measured best (native PlayStation pads, no lazy remap).
-- [ ] **Controller hot-plug report.** Try the Controller line with wireless (Bluetooth) PlayStation pads and other Xbox-compatible pads, and report what it shows. `launcher/src/controller.rs`.
 - [x] **Bring `SCARLETT_FRIENDLY` to the vendored runtime.** Done in 0.4.2: the runtime has it and the Stable preset sets it. `launcher/src/presets.rs`.
 
 Details: [`docs/STATUS.md`](docs/STATUS.md). Plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
@@ -258,10 +256,10 @@ Measured on an RTX 3060 12 GB with a Ryzen 5 5600X (Series S profile, the title'
 <details>
 <summary><b>How it works</b></summary>
 
-ScarlettPort is the **ScarlettPort runtime** (`engine/`, built as `scarlett.exe`) and the **ScarlettPort launcher** (`launcher/`).
+ScarlettPort is the **ScarlettPort runtime** (`engine/`, built as `scarlett.exe`). [SixLauncher](https://github.com/SixLauncher/launcher) runs it.
 
 ```
-launcher (ScarlettPort.exe, Rust + egui)
+SixLauncher (presets, shader preparation, Proton on Linux)
    │  dump folder, presets, SCARLETT_* switches
    ▼
 ScarlettPort runtime (scarlett.exe, engine/)
@@ -287,14 +285,13 @@ Since the runtime's fork point, 97,484 of its 204,657 lines (48%) are new or cha
 - **Memory work:** sub-page refreshes, a capped card-copy reserve, and opt-in out-of-memory back-off, commit gate and prefetch cap.
 - **Picture and shader option sets:** `SCARLETT_LOOK=1` and `SCARLETT_SHADER_FIXES=1`, offered together as the launcher's **Look** preset.
 - **Shader pipeline:** a shader prewarm and `scarlett precompile-graphics`.
-- **The launcher:** one window to pick a dump, build shaders (resumable, phase by phase), choose a verified preset (Stable, Look) and play; checked updates, controller detection, saves and crash lists.
+- **The launcher:** one window to pick a dump, build shaders (resumable, phase by phase), choose a verified preset (Stable, Look) and play. It now lives in [SixLauncher](https://github.com/SixLauncher/launcher) (`crates/core/src/scarlett.rs`).
 
 ### What's in here
 
 ```
 ScarlettPort/
 ├── engine/     ScarlettPort runtime (builds scarlett.exe)
-├── launcher/   native launcher (Rust, egui)
 ├── runtime/xcl Classic engine: XCL with our changes
 ├── scripts/    setup/play scripts for both engines
 ├── patches/    our changes to XCL (xcl-stack.patch)
@@ -369,7 +366,7 @@ The screenshots below were captured on an RTX 3060 under Windows 10.
 
 0.5.0 turns on by default: `SCARLETT_SAVE_NO_WAIT`, `SCARLETT_CARD_BIG_ROOM` (256 MB), `SCARLETT_GUARD_SINK` and `SCARLETT_LOADS_WIDE`; `=0` turns each off. The **Experimental** preset adds `SCARLETT_LOAD_UNPACED`, `SCARLETT_PREFETCH` and `SCARLETT_PIPELINE_BOOK` (booted cleanly, not measured on their own).
 
-The launcher offers two verified presets: **Stable** (the default) and **Look** (Stable plus `SCARLETT_LOOK=1` and `SCARLETT_SHADER_FIXES=1`; `scripts/play-scarlett.ps1 -Look` does the same). Settings, Features has a performance overlay and a ray tracing switch. All switches: [`docs/RUNTIMES.md`](docs/RUNTIMES.md).
+SixLauncher offers the verified presets: **Stable** (the default) and **Look** (Stable plus `SCARLETT_LOOK=1` and `SCARLETT_SHADER_FIXES=1`; `scripts/play-scarlett.ps1 -Look` does the same), plus Experimental and Custom. Its **Recursos do ScarlettPort** has a performance overlay, HDR, FSR and the other features. All switches: [`docs/RUNTIMES.md`](docs/RUNTIMES.md).
 
 - **`SCARLETT_LOOK=1` (picture):** ambient light so dark rooms are not black, texture and colour fixes, sampler and vertex-format fixes, and ocean textures copied back so boats float instead of sinking.
 - **`SCARLETT_SHADER_FIXES=1` (shader translation):** a more accurate translation of many shader instructions and forms. It changes the shader cache key, so the first run with it rebuilds shaders. Each part can be switched on its own (`SCARLETT_SHADER_*`).
@@ -398,7 +395,7 @@ cd ScarlettPort
 .\scripts\play-scarlett.ps1 -Game "D:\path\to\your\dump"
 ```
 
-`setup-scarlett.ps1` builds and fetches the Agility SDK; `play-scarlett.ps1` uses the Series S profile by default and the launcher's Stable settings. Its switches include `-AutoInput`, `-FastBoot` (testing only) and `-SaveSlot`.
+`setup-scarlett.ps1` builds and fetches the Agility SDK; `play-scarlett.ps1` uses the Series S profile by default and the Stable preset's settings. Its switches include `-AutoInput`, `-FastBoot` (testing only) and `-SaveSlot`.
 
 **B. XCL: menus and loading screens**
 
@@ -418,7 +415,7 @@ cd ScarlettPort
 - **World engine (default):** about 3 min for `scarlett warm` (measured 171 s for 25,889 shaders), then about 8 min for the graphics pipelines (491 s for 25,200).
 - **Classic engine (XCL, Settings, Game):** 20-30 min with "skip slow shaders" on; 45 min to several hours with it off.
 
-It resumes: stop it or close the launcher at any time, and building again skips what is done (finished phases are recorded in `<cache>\build-world.json`).
+It resumes: stop it at any time, and preparing again skips what is done.
 
 </details>
 
@@ -428,19 +425,13 @@ It resumes: stop it or close the launcher at any time, and building again skips 
 More: [`docs/FAQ.md`](docs/FAQ.md) and [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
 
 **The shader build looks stuck at ~85%.**
-That is the Classic (XCL) engine's slow tail: the last ~4,000 of 26,503 programs are huge world shaders that the graphics driver compiles in 6-190 s each, so the count stops moving for minutes at a time while it is still working. Update the launcher: it uses the World engine by default (about 3 minutes), shows the current step and how long it has taken, and with **Skip slow shaders** on (Settings, Options, 60 s) leaves the slowest ones to compile in game. Whatever you already built is kept.
+That is the Classic (XCL) engine's slow tail: the last ~4,000 of 26,503 programs are huge world shaders that the graphics driver compiles in 6-190 s each, so the count stops moving for minutes at a time while it is still working. Use the World engine (the ScarlettPort runtime, SixLauncher's ScarlettPort backend): about 3 minutes, with its step and progress shown. Whatever you already built is kept.
 
 **Do I need to rebuild after updates?**
-After a launcher or runtime update the launcher marks the shaders as needing a rebuild. The World engine keys its shader cache on the whole translator source, so an update that changes the shader translator translates everything again (about 3 minutes); one that does not reuses the cache. A per-shader key exists in our fork (`fx-cachekey`) but is not in the shipped runtime yet. The Classic engine's cache is keyed by the generated code, so it recompiles what changed.
-
-**Does the launcher go online?**
-Only for what you see: with "Updates" on it asks GitHub Releases at start whether a newer launcher exists. An update downloads only when you click it, into an `update` folder beside the launcher, is checked against the release's SHA-256 list, and is swapped in on the next start; the replaced version is kept in `previous` for a rollback. "Send report" opens a prefilled GitHub hardware-report issue in your browser (your user name and folders are removed from the log). Discord status talks only to the Discord app on your PC.
-
-**Will auto-update trigger antivirus?**
-It can. Unsigned apps that download and replace executables can get SmartScreen or antivirus warnings until a release has built up reputation. Our updater only acts when you click it, checks every file against the SHA-256 list, keeps the replaced version in `previous`, and never uses `%TEMP%`. It updates only the launcher and its bundled `runtime` folder; a local build you picked is never touched. If your antivirus flags a release, please report it as a false positive: [Microsoft's submission page](https://www.microsoft.com/en-us/wdsi/filesubmission).
+After a runtime update SixLauncher marks the shaders as needing preparation again. The World engine keys its shader cache on the whole translator source, so an update that changes the shader translator translates everything again (about 3 minutes); one that does not reuses the cache. A per-shader key exists in our fork (`fx-cachekey`) but is not in the shipped runtime yet. The Classic engine's cache is keyed by the generated code, so it recompiles what changed.
 
 **Can I run my own runtime build?**
-Yes: Settings, Runtime, Local build, then browse to its `scarlett.exe` (keep its `D3D12` folder beside it) and pick a cache folder. The Stable preset sets the verified environment, so no play script is needed.
+Yes: in SixLauncher, Compatibilidade, choose **Custom** and browse to its `scarlett.exe` (keep its `D3D12` folder beside it). The Stable preset sets the verified environment, so no play script is needed.
 
 </details>
 

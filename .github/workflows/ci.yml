@@ -19,7 +19,6 @@ jobs:
     outputs:
       xcl: ${{ steps.f.outputs.xcl }}
       engine: ${{ steps.f.outputs.engine }}
-      launcher: ${{ steps.f.outputs.launcher }}
       scripts: ${{ steps.f.outputs.scripts }}
     steps:
       - uses: actions/checkout@v4
@@ -32,9 +31,6 @@ jobs:
               - '.github/workflows/ci.yml'
             engine:
               - 'engine/**'
-              - '.github/workflows/ci.yml'
-            launcher:
-              - 'launcher/**'
               - '.github/workflows/ci.yml'
             scripts:
               - 'scripts/**'
@@ -119,21 +115,3 @@ jobs:
       # device and are not run here.
       - name: Unit tests (no GPU)
         run: cargo test --release --locked --lib -p scarlett-core -p scarlett-formats -p scarlett-pe -p scarlett-loader -p scarlett-shader -p scarlett-pipeline -- --test-threads=4
-
-  launcher:
-    needs: changes
-    if: needs.changes.outputs.launcher == 'true'
-    runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: launcher
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: launcher
-      - name: Build
-        run: cargo build --release --locked
-      - name: Unit tests
-        run: cargo test --release --locked
