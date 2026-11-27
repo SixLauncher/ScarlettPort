@@ -10,7 +10,7 @@
 #                          shader builds instead of ending itself
 #   SCARLETT_RELAY=2        submission relay, form 2
 #   SCARLETT_PIPELINE_WAIT_MS=0  do not hold a draw back waiting for a pipeline build
-#   The engine's CAND4 group (THIN, CARD_BUFFERS_MIN_KB, CARD_STEPS, ...), as the launcher sets it.
+#   The engine's CAND4 group (THIN, CARD_BUFFERS_MIN_KB, CARD_STEPS, ...), as SixLauncher sets it.
 #   SCARLETT_FAST_BOOT=1    with -FastBoot: press through logos and menus (testing only)
 #   SCARLETT_BVH_BUILDER=1  with -RayTracing: the title's ray-traced indirect light, for that launch only
 #   SCARLETT_SAVE_SLOT      with -SaveSlot: pick a save slot by name
@@ -59,8 +59,8 @@ $env:SCARLETT_PIPELINE_WAIT_MS = '0'
 # (512 MiB on a <=12 GiB budget) and reserves at most 1 GiB of texture room for card buffers,
 # so overriding only the ceiling (the old 4096) leaves the two out of step.
 
-# The engine's settings, identical to the launcher's Stable preset (CAND4 in
-# launcher/src/presets.rs) and to engine/Play-ScarlettPort.cmd. Keep the three lists in step.
+# The engine's settings, identical to SixLauncher's Stable preset (CAND4 in its
+# crates/core/src/scarlett.rs) and to engine/Play-ScarlettPort.cmd. Keep the three lists in step.
 $live = [ordered]@{
     'SCARLETT_AMBIENT_AIR'          = '1.5'
     'SCARLETT_TEXTURE_NO_WAIT'      = '1'

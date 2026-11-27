@@ -1,12 +1,12 @@
 name: Bug report
-description: Crash, hang, wrong output or a script/launcher failure
+description: Crash, hang, wrong output or a script failure
 labels: [bug]
 body:
   - type: dropdown
     id: runtime
     attributes:
       label: Runtime
-      options: [XCL, ScarlettPort runtime, Launcher, Scripts, Other]
+      options: [XCL, ScarlettPort runtime, Scripts, Other]
     validations:
       required: true
   - type: input
@@ -41,7 +41,7 @@ body:
     id: repro
     attributes:
       label: What you ran
-      description: Command or launcher settings, and any environment variables.
+      description: Command or SixLauncher settings (its Log tab shows the command), and any environment variables.
   - type: textarea
     id: log
     attributes:

@@ -9,9 +9,9 @@ Both runtimes run a title from your own dump. Each currently gets further at som
 | Open world | world reached and gameplay starts on an RTX 3060, Series S profile | world reached, survives 7+ minutes |
 | Speed in the world | about 4 fps in the prologue (RTX 3060, Series S profile), GPU-bound | not rendering the final image |
 | Final image | lit; shadowed areas too dark; the tile-grid overlay is fixed | black |
-| Extras | frame capture, save slots, press file, fast boot (testing), launcher (default engine) | launcher (Classic engine), pipeline journal and offline build, profiles, achievements, crash reports |
+| Extras | frame capture, save slots, press file, fast boot (testing), SixLauncher backend | launcher (Classic engine), pipeline journal and offline build, profiles, achievements, crash reports |
 | Shader build | `scarlett shaders <dump>` (a few minutes) then `scarlett warm` (the pipelines earlier runs recorded) | `xcl shaders --precompile`: 45 min to hours (slow tail from 83%) |
-| Scripts | `setup-scarlett.ps1`, `play-scarlett.ps1`, launcher | `setup.ps1`, `play.ps1`, launcher |
+| Scripts | `setup-scarlett.ps1`, `play-scarlett.ps1`, SixLauncher | `setup.ps1`, `play.ps1`, launcher |
 
 Neither is verified playable.
 
@@ -34,7 +34,7 @@ Every switch is a `SCARLETT_*` environment variable. The full list is in the sou
 |---|---|
 | `SCARLETT_GAME_DIR` | the dump folder (required) |
 | `SCARLETT_UPSCALER=<6\|title\|7\|fsr>` | the upscaler the title uses. Default: the title's own (6), also on the Series S profile, where the title would pick FSR; FSR asked for without `amd_fidelityfx_upscaler*` in the game folder falls back to the title's own. `SCARLETT_OWN_UPSCALER=0` leaves the title's choice alone (`crates/scarlett-loader/src/resolution.rs`) |
-| `SCARLETT_NO_WATCHDOG=1` | set by `play-scarlett.ps1` and the launcher; `scarlett.exe` does not read it (the vendored runtime's `XCL_NO_WATCHDOG` is its counterpart) |
+| `SCARLETT_NO_WATCHDOG=1` | set by `play-scarlett.ps1` and SixLauncher; `scarlett.exe` does not read it (the vendored runtime's `XCL_NO_WATCHDOG` is its counterpart) |
 | `SCARLETT_FAST_BOOT=1` | testing only: press through logos and menus, stop once in the world |
 | `SCARLETT_FAST_BOOT_ESC=0` | with fast boot: press only A (Enter), not START (Esc), which can open the pause menu once in the world so the world is never seen |
 | `SCARLETT_FAST_BOOT_SUSTAIN=30` | with fast boot: world frames needed before fast boot stops (default 3); more keeps a slow loading screen from passing for the world |
@@ -54,7 +54,7 @@ Every switch is a `SCARLETT_*` environment variable. The full list is in the sou
 | `SCARLETT_TEX_SPAN_PCT=<n>` | share of a long frame the texture pass may take (25 by default; `0`: off) |
 | `SCARLETT_SHADER_LOOP_LIMIT=<n>` | cap on translated shader loop iterations (can smear hair; unset by default) |
 
-### Verified speed settings (set by `play-scarlett.ps1` and the launcher; each is off in the runtime itself)
+### Verified speed settings (set by `play-scarlett.ps1` and SixLauncher; each is off in the runtime itself)
 
 Measured together on the reference machine (RTX 3060, Series S profile): the per-frame read waits drop from about 156 to about 26 ms.
 
@@ -90,22 +90,17 @@ None of these has been measured on the reference machine in this build. Try them
 | `SCARLETT_LINK_PAIRS=<file>` | linked mesh/pixel pairs file for translation |
 | `SCARLETT_F3_VIEW_FIX` | host-side view fix; leave off |
 
-### Shader build (launcher)
+### Shader build (SixLauncher)
 
-The launcher's **Build shaders** runs, from the `runtime` folder beside it:
+SixLauncher's **Preparar shaders** runs `scarlett prepare --jobs N` with the preset's environment (`SCARLETT_GAME_DIR`, `SCARLETT_CACHE_DIR`, `SCARLETT_DATA_DIR` and the preset's switches), through Proton on Linux. It translates every shader into the cache, then makes the pipelines earlier runs recorded, and prints `prepare step|progress|done` lines the window turns into a progress bar. `N` is the logical core count minus one, capped by free RAM (1 GB per job). It resumes: what is in the cache is skipped. A stamp (`prepared.txt` in the preset's cache) records the runtime build and preset it was prepared for.
 
-1. `scarlett warm "<dump>" --jobs N` with `SCARLETT_GAME_DIR=<dump>` and `SCARLETT_CACHE_DIR=<cache>\scarlett`: translates every shader into the cache and makes the compute pipelines. About 3 min (171 s for 25,889 shaders on a 12-thread CPU). It prints a line every 2,000 shaders; between lines the launcher shows the current range and its elapsed time. `N` is the logical core count minus one, capped by free RAM (512 MB per job).
-2. `scarlett precompile-graphics "<dump>\shaders.rpf" --skip S --limit 1000` in chunks of 1,000 records, each saved when it ends (491 s for 25,200 pipelines in one run). **On**: the rectangle-list fix is in this copy, so play runs set `SCARLETT_PRECOMPILED_GRAPHICS=1` and the launcher runs this phase (`engine::PRECOMPILED_GRAPHICS` controls both).
-
-Resuming: finished steps and chunks are recorded in `<cache>\build-world.json`, keyed by the SHA-256 of `scarlett.exe`; translated shaders are read back from the cache, so a restarted build skips them. A different `scarlett.exe` starts the record over; the translation cache is keyed by the translator's source, so only a translator change makes every shader translate again. Play runs use the same `SCARLETT_CACHE_DIR`.
-
-With **Skip slow shaders** (Settings, Options; on, 60 s by default) a pipeline chunk or the Classic precompile that prints nothing for that long is stopped and its shaders compile on demand in game. `scarlett warm` is never stopped this way.
+`scarlett warm` and `scarlett precompile-graphics` (the older two-phase build) still exist for scripts.
 
 Classic engine: `xcl shaders shaders.rpf --precompile --pipelines --only cs` with `XCL_PIPELINE_THREADS` set from the CPU count and free RAM (1.5 GB per driver compile, at most 8). It gets to about 22,400 of 26,503 (83–85%) quickly; the rest are huge compute shaders the driver compiles in 6–190 s each, during which the count does not move. It resumes from its DXIL and driver caches.
 
 ## XCL
 
-Our modified XCL tree (ivall/xcl): console OS layer, D3D12.X, RDNA2 to HLSL to DXIL recompiler. Run it through `play.ps1`, or through the launcher's Classic engine when `xcl.exe` is in its `runtime` folder. Our changes against upstream are in `patches/xcl-stack.patch`.
+Our modified XCL tree (ivall/xcl): console OS layer, D3D12.X, RDNA2 to HLSL to DXIL recompiler. Run it through `play.ps1`, or through SixLauncher's XCL backend. Our changes against upstream are in `patches/xcl-stack.patch`.
 
 | Variable | Effect |
 |---|---|

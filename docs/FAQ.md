@@ -37,12 +37,12 @@ See [Antivirus warnings](TROUBLESHOOTING.md#antivirus-warnings). Short version: 
 
 ## Will the first start be slow?
 
-Yes. Shaders have to be translated and pipelines built once. Press **Build shaders** in the launcher before **Play** (with the default World engine, about 3 minutes plus about 8 minutes for pipelines, measured on a 12-thread CPU). Even then the first run can stall while the rest compile. A warm-up that finishes before the first frame (prewarm) is planned and not released yet.
+Yes. Shaders have to be translated and pipelines built once. Press **Preparar shaders** in SixLauncher before **Jogar** (with the default World engine, about 3 minutes plus about 8 minutes for pipelines, measured on a 12-thread CPU). Even then the first run can stall while the rest compile. A warm-up that finishes before the first frame (prewarm) is planned and not released yet.
 
 ## The game says my save is broken. Did I lose it?
 
 Probably not, and don't delete anything. See [the save prompt](TROUBLESHOOTING.md#the-save-is-broken-prompt).
 
-## Does the launcher go online?
+## Where is the launcher?
 
-Only to check GitHub Releases for a launcher update (if Updates is on), and it downloads one only when you click it. Details are in the [README FAQ](../README.md#-faq).
+ScarlettPort's own launcher was folded into [SixLauncher](https://github.com/SixLauncher/launcher), which runs the runtime with the same presets, shader preparation, features and save backups, on Windows and, through Proton, on Linux.
