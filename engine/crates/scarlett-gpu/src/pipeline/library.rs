@@ -514,6 +514,9 @@ fn library() -> Option<&'static Library> {
 /// adapter or driver change, damage).
 fn open(device: &ID3D12Device1, blob: Blob) -> Option<Library> {
     let make = |bytes: &[u8]| -> windows::core::Result<ID3D12PipelineLibrary1> {
+        if bytes.is_empty() {
+            return empty_library(device);
+        }
         // SAFETY: the bytes outlive the library (kept beside it).
         unsafe {
             device.CreatePipelineLibrary::<ID3D12PipelineLibrary>(bytes)?.cast()
@@ -545,13 +548,34 @@ fn open(device: &ID3D12Device1, blob: Blob) -> Option<Library> {
     // The rejected bytes are let go (a mapped file is unmapped) before the
     // empty library is made: nothing reads them any more.
     drop(blob);
-    let library = make(&[]).ok()?;
+    let library = make(&[]).inspect_err(|e| tracing::warn!(error = %e, "the host cannot make a pipeline library")).ok()?;
     Some(Library {
         library,
         _blob: Blob::None,
         added: AtomicU64::new(0),
         saving: RwLock::new(()),
     })
+}
+
+/// A new, empty library. The blob is a null pointer: an empty slice's
+/// pointer is not null (it is dangling), and vkd3d-proton (Proton) refuses a
+/// blob that is there but holds nothing (`E_INVALIDARG`), so under Proton no
+/// library was ever made and no pipeline kept between runs.
+fn empty_library(device: &ID3D12Device1) -> windows::core::Result<ID3D12PipelineLibrary1> {
+    let mut out = std::ptr::null_mut();
+    // SAFETY: the method as the ABI has it: no blob, the interface asked by
+    // its IID, a pointer for the result.
+    unsafe {
+        (windows::core::Interface::vtable(device).CreatePipelineLibrary)(
+            windows::core::Interface::as_raw(device),
+            std::ptr::null(),
+            0,
+            &ID3D12PipelineLibrary1::IID,
+            &mut out,
+        )
+        .ok()?;
+        Ok(ID3D12PipelineLibrary1::from_raw(out))
+    }
 }
 
 /// A pipeline's name in the library: the hash of what its host
@@ -894,6 +918,17 @@ mod tests {
         assert_ne!(a, name("mesh", b"root", &[b"vs", b"ps"], "state"));
         // Parts do not run into each other.
         assert_ne!(a, name("graphics", b"root", &[b"vsp", b"s"], "state"));
+    }
+
+    /// An empty library is made (under Proton, only with no blob at all).
+    #[test]
+    fn the_host_makes_an_empty_library() {
+        let Some(device) = crate::host::host().and_then(|h| h.device.cast::<ID3D12Device1>().ok()) else {
+            return; // no host GPU here
+        };
+        let library = empty_library(&device).expect("an empty library");
+        // SAFETY: a plain query on a live library.
+        assert!(unsafe { library.GetSerializedSize() } > 0);
     }
 
     #[test]
