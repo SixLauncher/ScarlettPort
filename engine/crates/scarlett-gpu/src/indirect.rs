@@ -3397,11 +3397,11 @@ float4 second(float4 at : SV_Position) : SV_Target {
     /// record is: one group of one thread that writes one word.
     const WORK: &str = r#"
 #define RS "UAV(u0)"
-RWByteAddressBuffer words : register(u0);
+RWStructuredBuffer<uint> words : register(u0);
 [RootSignature(RS)]
 [numthreads(1, 1, 1)]
 void work() {
-    words.Store(0, words.Load(0) + 1);
+    words[0] = words[0] + 1;
 }
 "#;
 

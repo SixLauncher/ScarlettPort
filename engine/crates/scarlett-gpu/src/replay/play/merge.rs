@@ -18,8 +18,10 @@ const SOURCE: &str = r#"
 #define RS "RootConstants(num32BitConstants=2, b0), SRV(t0), UAV(u0), UAV(u1), UAV(u2)"
 cbuffer C : register(b0) { uint words; uint call; };
 ByteAddressBuffer from : register(t0);
-RWByteAddressBuffer to : register(u0);
-RWByteAddressBuffer base : register(u1);
+// Structured, not byte-address: Wine's HLSL compiler (Proton) has no loads from a
+// RWByteAddressBuffer (E5005).
+RWStructuredBuffer<uint> to : register(u0);
+RWStructuredBuffer<uint> base : register(u1);
 // For each call: words put, words of the card's left that were to get
 // another value, and of those the ones that were to get back what stood
 // there before the card wrote.
@@ -29,7 +31,7 @@ RWStructuredBuffer<uint> counts : register(u2);
 void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= words) return;
     uint at = id.x * 4;
-    uint v = from.Load(at), now = to.Load(at), was = base.Load(at), n;
+    uint v = from.Load(at), now = to[id.x], was = base[id.x], n;
     if (now != was) {
         if (v == now) return;
         InterlockedAdd(counts[(call * 12 + 4) / 4], 1, n);
@@ -38,8 +40,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
     if (v == now) return;
     InterlockedAdd(counts[(call * 12) / 4], 1, n);
-    to.Store(at, v);
-    base.Store(at, v);
+    to[id.x] = v;
+    base[id.x] = v;
 }
 "#;
 

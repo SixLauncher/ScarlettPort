@@ -790,6 +790,37 @@ mod tests {
         assert_eq!(checksum(&again), again[4..20]);
     }
 
+    /// Compiles `source` here and makes its root signature and compute
+    /// pipeline on the host, or tells the compiler's message.
+    fn makes_on_the_host(source: &str) -> Result<(), String> {
+        let Some(host) = crate::host::host() else { return Ok(()) };
+        let mut code: Option<ID3DBlob> = None;
+        let mut errors: Option<ID3DBlob> = None;
+        unsafe {
+            D3DCompile(source.as_ptr().cast(), source.len(), s!("test"), None, None, s!("main"), s!("cs_5_1"), 0, 0, &mut code, Some(&mut errors))
+                .map_err(|e| format!("{e}: {}", text(errors.as_ref())))?;
+            let code = code.ok_or("no code")?;
+            let bytes = std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize());
+            let root: ID3D12RootSignature = host.device.CreateRootSignature(0, bytes).map_err(|e| format!("root signature: {e}"))?;
+            let _: ID3D12PipelineState = host
+                .device
+                .CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                    pRootSignature: std::mem::transmute_copy(&root),
+                    CS: D3D12_SHADER_BYTECODE { pShaderBytecode: bytes.as_ptr().cast(), BytecodeLength: bytes.len() },
+                    ..Default::default()
+                })
+                .map_err(|e| format!("pipeline: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// The compare of copies in the card's memory (`crate::host`): without
+    /// it no copy is kept in the card's memory.
+    #[test]
+    fn the_card_compare_is_made() {
+        makes_on_the_host(crate::host::CARD_COMPARE).unwrap();
+    }
+
     /// A shader with its root signature gives a host root signature, also
     /// under a compiler that leaves it out.
     #[test]
