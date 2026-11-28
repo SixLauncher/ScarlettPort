@@ -30,6 +30,16 @@ const COLUMNS: u32 = 40;
 const LINES: u32 = 9;
 const RIM: u32 = 3;
 
+/// A box's characters: in a line, and lines.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Grid {
+    columns: u32,
+    lines: u32,
+}
+
+/// The panel's box.
+const PANEL: Grid = Grid { columns: COLUMNS, lines: LINES };
+
 /// The texts are put into one of these in turn: the card reads the others,
 /// at most half a second old.
 const UPLOADS: usize = 4;
@@ -102,14 +112,19 @@ const fn glyph(c: u8) -> [u8; 7] {
         b'.' => [0, 0, 0, 0, 0, 0b01100, 0b01100],
         b'/' => [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000],
         b'-' => [0, 0, 0, 0b11111, 0, 0, 0],
+        b':' => [0, 0b01100, 0b01100, 0, 0b01100, 0b01100, 0],
+        b'(' => [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010],
+        b')' => [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000],
+        b'>' => [0b01000, 0b00100, 0b00010, 0b00001, 0b00010, 0b00100, 0b01000],
+        b',' => [0, 0, 0, 0, 0b01100, 0b00100, 0b01000],
         b' ' => [0; 7],
         _ => [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111],
     }
 }
 
 /// The box's size in pixels, a dot being `scale` of them each way.
-const fn size(scale: u32) -> (u32, u32) {
-    ((COLUMNS * CELL.0 + 2 * RIM) * scale, (LINES * CELL.1 + 2 * RIM) * scale)
+const fn size(grid: Grid, scale: u32) -> (u32, u32) {
+    ((grid.columns * CELL.0 + 2 * RIM) * scale, (grid.lines * CELL.1 + 2 * RIM) * scale)
 }
 
 /// Pixels to a dot for a picture that high: a 720-line screenshot of it
@@ -119,11 +134,11 @@ fn scale(height: u32) -> u32 {
 }
 
 /// Whether a dot of the picture of `lines` is white.
-fn lit(lines: &[String], x: u32, y: u32) -> bool {
+fn lit(grid: Grid, lines: &[String], x: u32, y: u32) -> bool {
     let (Some(x), Some(y)) = (x.checked_sub(RIM), y.checked_sub(RIM)) else {
         return false;
     };
-    if x % CELL.0 >= GLYPH.0 || y % CELL.1 >= GLYPH.1 || x / CELL.0 >= COLUMNS {
+    if x % CELL.0 >= GLYPH.0 || y % CELL.1 >= GLYPH.1 || x / CELL.0 >= grid.columns {
         return false;
     }
     let Some(&c) = lines.get((y / CELL.1) as usize).and_then(|l| l.as_bytes().get((x / CELL.0) as usize)) else {
@@ -147,14 +162,14 @@ fn colours(format: DXGI_FORMAT) -> Option<[&'static [u8]; 2]> {
 }
 
 /// The box as rows of `pitch` bytes.
-fn painted(lines: &[String], scale: u32, colours: [&[u8]; 2], pitch: usize) -> Vec<u8> {
-    let (width, height) = size(scale);
+fn painted(grid: Grid, lines: &[String], scale: u32, colours: [&[u8]; 2], pitch: usize) -> Vec<u8> {
+    let (width, height) = size(grid, scale);
     let bytes = colours[0].len();
     let mut out = vec![0; pitch * height as usize];
     for y in 0..height / scale {
         let top = pitch * (y * scale) as usize;
         for x in 0..width / scale {
-            let colour = colours[usize::from(lit(lines, x, y))];
+            let colour = colours[usize::from(lit(grid, lines, x, y))];
             for i in 0..scale {
                 let at = top + (x * scale + i) as usize * bytes;
                 out[at..at + bytes].copy_from_slice(colour);
@@ -229,6 +244,7 @@ fn text(c: &[f64; COUNTERS], ms: f64, worst: f64, cost: f64, host: &Host) -> Vec
 struct Buffers {
     format: DXGI_FORMAT,
     scale: u32,
+    grid: Grid,
     pitch: u32,
     uploads: Vec<(ID3D12Resource, *mut u8)>,
     card: ID3D12Resource,
@@ -242,8 +258,8 @@ struct Buffers {
 unsafe impl Send for Buffers {}
 
 impl Buffers {
-    fn new(host: &Host, format: DXGI_FORMAT, scale: u32) -> Option<Buffers> {
-        let (width, height) = size(scale);
+    fn new(host: &Host, format: DXGI_FORMAT, scale: u32, grid: Grid) -> Option<Buffers> {
+        let (width, height) = size(grid, scale);
         let pitch = (width * colours(format)?[0].len() as u32).next_multiple_of(256);
         let bytes = u64::from(pitch) * u64::from(height);
         let uploads = (0..UPLOADS).map(|_| host.upload_buffer(bytes)).collect::<Option<Vec<_>>>()?;
@@ -268,16 +284,135 @@ impl Buffers {
                 .CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut card)
                 .ok()?;
         }
-        Some(Buffers { format, scale, pitch, uploads, card: card?, turn: 0, fresh: false })
+        Some(Buffers { format, scale, grid, pitch, uploads, card: card?, turn: 0, fresh: false })
     }
 
     fn write(&mut self, lines: &[String]) {
         let Some(colours) = colours(self.format) else { return };
-        let picture = painted(lines, self.scale, colours, self.pitch as usize);
+        let picture = painted(self.grid, lines, self.scale, colours, self.pitch as usize);
         self.turn = (self.turn + 1) % UPLOADS;
         // SAFETY: a mapped upload buffer of the picture's size, which the card read a second or more ago.
         unsafe { std::ptr::copy_nonoverlapping(picture.as_ptr(), self.uploads[self.turn].1, picture.len()) };
         self.fresh = true;
+    }
+
+    /// Records the copy of the box onto `back` (a swap chain buffer `size`
+    /// big, in the state to be copied into) with its upper left corner at
+    /// `at`, cut to what lies within.
+    fn copy_onto(&mut self, list: &HostList, back: &ID3D12Resource, at: (u32, u32), (width, height): (u32, u32)) {
+        let (w, h) = size(self.grid, self.scale);
+        if at.0 >= width || at.1 >= height {
+            return;
+        }
+        let list = &list.list;
+        // SAFETY: an open list and live resources; the copied part lies within both.
+        unsafe {
+            if std::mem::take(&mut self.fresh) {
+                list.CopyResource(&self.card, &self.uploads[self.turn].0);
+                list.ResourceBarrier(&[transition(
+                    &self.card,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE,
+                )]);
+            }
+            let from = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: std::mem::transmute_copy(&self.card),
+                Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                        Offset: 0,
+                        Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                            Format: self.format,
+                            Width: w,
+                            Height: h,
+                            Depth: 1,
+                            RowPitch: self.pitch,
+                        },
+                    },
+                },
+            };
+            let to = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: std::mem::transmute_copy(back),
+                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+            };
+            let part = D3D12_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: w.min(width - at.0),
+                bottom: h.min(height - at.1),
+                back: 1,
+            };
+            list.CopyTextureRegion(&to, at.0, at.1, 0, &from, Some(&part));
+        }
+    }
+}
+
+/// The runtime's question to the player (`crate::prompt`, the account
+/// picker) in a box in the middle of the picture, over the title's frame.
+pub(super) struct Prompt {
+    /// The text in the buffers (`crate::prompt`'s number for it).
+    shown: u64,
+    buffers: Option<Buffers>,
+    failed: bool,
+}
+
+/// Pixels to a dot for the prompt: four on a 1080-line picture.
+fn prompt_scale(height: u32) -> u32 {
+    (height / 270).max(1)
+}
+
+/// The prompt's box for `lines`: as wide as the longest (at least 24
+/// characters), as many lines.
+fn prompt_grid(lines: &[String]) -> Grid {
+    let widest = lines.iter().map(|l| l.len()).max().unwrap_or(0) as u32;
+    Grid { columns: widest.clamp(24, 64), lines: (lines.len() as u32).max(1) }
+}
+
+/// Where a box `boxed` big goes to be in the middle of a picture `picture` big.
+fn centred(boxed: (u32, u32), picture: (u32, u32)) -> (u32, u32) {
+    (picture.0.saturating_sub(boxed.0) / 2, picture.1.saturating_sub(boxed.1) / 2)
+}
+
+impl Prompt {
+    pub(super) fn new() -> Prompt {
+        Prompt { shown: 0, buffers: None, failed: false }
+    }
+
+    /// Records the copy of the prompt, if one is asked, onto `back` (as
+    /// [`Panel::draw`]).
+    pub(super) fn draw(
+        &mut self,
+        host: &Host,
+        list: &HostList,
+        back: &ID3D12Resource,
+        (width, height): (u32, u32),
+        format: DXGI_FORMAT,
+    ) {
+        crate::prompt::presented();
+        let Some((id, lines)) = crate::prompt::current() else {
+            return;
+        };
+        let _ours = crate::replay::record::unrecorded();
+        let (scale, grid) = (prompt_scale(height), prompt_grid(&lines));
+        let wanted = (format, scale, grid);
+        if self.buffers.as_ref().is_none_or(|b| (b.format, b.scale, b.grid) != wanted) {
+            std::mem::forget(self.buffers.take());
+            self.buffers = Buffers::new(host, format, scale, grid);
+            if self.buffers.is_none() && !self.failed {
+                tracing::warn!(?format, "the runtime's prompt cannot be drawn in this picture format");
+            }
+            self.failed = self.buffers.is_none();
+            self.shown = 0;
+        }
+        let Some(buffers) = &mut self.buffers else { return };
+        if self.shown != id {
+            buffers.write(&lines);
+            self.shown = id;
+        }
+        let at = centred(size(grid, scale), (width, height));
+        buffers.copy_onto(list, back, at, (width, height));
     }
 }
 
@@ -368,7 +503,7 @@ impl Panel {
         if self.buffers.as_ref().is_none_or(|b| (b.format, b.scale) != (format, scale)) {
             // (What the card may still read stays: a picture's size changes once or twice in a run.)
             std::mem::forget(self.buffers.take());
-            self.buffers = Buffers::new(host, format, scale);
+            self.buffers = Buffers::new(host, format, scale, PANEL);
             self.failed = self.buffers.is_none();
             self.changed = true;
         }
@@ -376,49 +511,7 @@ impl Panel {
         if std::mem::take(&mut self.changed) {
             buffers.write(&self.lines);
         }
-        let (w, h) = size(scale);
-        let list = &list.list;
-        // SAFETY: an open list and live resources; the box lies within both.
-        unsafe {
-            if std::mem::take(&mut buffers.fresh) {
-                list.CopyResource(&buffers.card, &buffers.uploads[buffers.turn].0);
-                list.ResourceBarrier(&[transition(
-                    &buffers.card,
-                    D3D12_RESOURCE_STATE_COPY_DEST,
-                    D3D12_RESOURCE_STATE_COPY_SOURCE,
-                )]);
-            }
-            let from = D3D12_TEXTURE_COPY_LOCATION {
-                pResource: std::mem::transmute_copy(&buffers.card),
-                Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                    PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                        Offset: 0,
-                        Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                            Format: format,
-                            Width: w,
-                            Height: h,
-                            Depth: 1,
-                            RowPitch: buffers.pitch,
-                        },
-                    },
-                },
-            };
-            let to = D3D12_TEXTURE_COPY_LOCATION {
-                pResource: std::mem::transmute_copy(back),
-                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
-            };
-            let part = D3D12_BOX {
-                left: 0,
-                top: 0,
-                front: 0,
-                right: w.min(width),
-                bottom: h.min(height),
-                back: 1,
-            };
-            list.CopyTextureRegion(&to, 0, 0, 0, &from, Some(&part));
-        }
+        buffers.copy_onto(list, back, (0, 0), (width, height));
         self.cost += began.elapsed();
     }
 }
@@ -431,7 +524,7 @@ mod tests {
     /// alike.
     #[test]
     fn characters_differ() {
-        let used: Vec<u8> = (b'0'..=b'9').chain(b'A'..=b'Z').chain(*b"./- ").collect();
+        let used: Vec<u8> = (b'0'..=b'9').chain(b'A'..=b'Z').chain(*b"./- :()>,").collect();
         for (i, a) in used.iter().enumerate() {
             assert_ne!(glyph(*a), glyph(b'#'), "{} has a picture", *a as char);
             assert!(glyph(*a).iter().all(|row| row >> GLYPH.0 == 0));
@@ -445,10 +538,10 @@ mod tests {
     fn a_box_is_painted() {
         let lines = vec!["I".to_owned(), " i".to_owned()];
         for scale in [1, 2, 4] {
-            let (width, height) = size(scale);
+            let (width, height) = size(PANEL, scale);
             let pitch = (width * 4).next_multiple_of(256) as usize;
             let colours = colours(DXGI_FORMAT_R10G10B10A2_UNORM).unwrap();
-            let picture = painted(&lines, scale, colours, pitch);
+            let picture = painted(PANEL, &lines, scale, colours, pitch);
             assert_eq!(picture.len(), pitch * height as usize);
             let at = |x: u32, y: u32| &picture[y as usize * pitch + x as usize * 4..][..4];
             // The rim is black, the first letter's top row lit in its middle.
@@ -460,6 +553,26 @@ mod tests {
             assert_eq!(at((RIM + CELL.0 + 2) * scale, (RIM + CELL.1) * scale), colours[1]);
             // Nothing past a line's end.
             assert_eq!(at((RIM + CELL.0 * 2 + 2) * scale, (RIM + CELL.1) * scale), colours[0]);
+        }
+    }
+
+    /// The account picker's box: as wide as its longest line, in the middle
+    /// of a 1080-line picture, with every character it uses drawable.
+    #[test]
+    fn the_prompt_box_fits_its_lines_in_the_middle() {
+        let lines: Vec<String> = ["SELETOR DE CONTA", "", "> PLAYER", "A: JOGAR COM ESTA CONTA", "B: CANCELAR"]
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        let grid = prompt_grid(&lines);
+        assert_eq!(grid, Grid { columns: 24, lines: 5 });
+        let scale = prompt_scale(1080);
+        assert_eq!(scale, 4);
+        let boxed = size(grid, scale);
+        assert_eq!(centred(boxed, (1920, 1080)), ((1920 - boxed.0) / 2, (1080 - boxed.1) / 2));
+        assert_eq!(centred((4000, 10), (1920, 1080)).0, 0, "a box wider than the picture starts at its edge");
+        for c in lines.concat().bytes() {
+            assert_ne!(glyph(c), glyph(b'#'), "{} has a picture", c as char);
         }
     }
 

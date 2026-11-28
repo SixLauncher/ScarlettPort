@@ -1,7 +1,8 @@
 //! XUser: one offline local user, signed in, never a guest, with every
 //! privilege. Served as the user provider's objects from `QueryApiImpl`;
-//! adding a user completes through `xasync` like any other async call. No
-//! input device is associated with the user (there are none, `gameinput`).
+//! adding a user completes through `xasync` like any other async call. Every
+//! input device (`gameinput`'s pads and keyboard) belongs to that user, as a
+//! console's controllers belong to the profile signed in on them.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::ffi::{c_char, c_void};
@@ -58,19 +59,31 @@ pub const XUID: u64 = 0x0009_0000_0000_0001;
 pub const LOCAL_ID: u64 = 1;
 const GAMERTAG: &str = "Player";
 
-/// The player name: `SCARLETT_GAMERTAG` (at most 15 characters, as on the
-/// console), else "Player".
-fn gamertag() -> &'static str {
-    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    NAME.get_or_init(|| {
-        let v = std::env::var("SCARLETT_GAMERTAG").unwrap_or_default();
-        let v: String = v.trim().chars().take(15).collect();
-        if v.is_empty() {
-            GAMERTAG.to_string()
-        } else {
-            v
-        }
+/// The console's longest gamertag.
+const GAMERTAG_MAX: u32 = 15;
+
+/// The player name: `SCARLETT_GAMERTAG` at start, or what the account picker
+/// set since; at most 15 characters, as on the console; "Player" if empty.
+static NAME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn clean_name(name: &str) -> Option<String> {
+    let name: String = name.trim().chars().take(GAMERTAG_MAX as usize).collect();
+    (!name.is_empty()).then_some(name)
+}
+
+fn gamertag() -> String {
+    let mut name = NAME.lock().unwrap_or_else(|e| e.into_inner());
+    name.get_or_insert_with(|| {
+        clean_name(&std::env::var("SCARLETT_GAMERTAG").unwrap_or_default())
+            .unwrap_or_else(|| GAMERTAG.to_string())
     })
+    .clone()
+}
+
+fn set_gamertag(name: &str) {
+    if let Some(name) = clean_name(name) {
+        *NAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(name);
+    }
 }
 
 /// The only user; a handle is its address, duplicating and closing are free.
@@ -130,8 +143,119 @@ extern "system" fn add_provider(op: u32, data: *const ProviderData) -> HRESULT {
 /// Tells our add calls apart from other async calls on the same block.
 static ADD: u8 = 0;
 
-/// Any options add the one user, silently.
+/// `XUserAddOptions`: add the default user without UI, or with UI only if
+/// there is none. With neither, the title asks for the account picker (its
+/// "Account picker (Y)" prompt).
+const ADD_DEFAULT_SILENTLY: u32 = 0x1;
+const ADD_DEFAULT_ALLOWING_UI: u32 = 0x4;
+
+fn wants_picker(options: u32) -> bool {
+    options & (ADD_DEFAULT_SILENTLY | ADD_DEFAULT_ALLOWING_UI) == 0
+}
+
+/// The account picker's words, in Portuguese on a Portuguese system and in
+/// English elsewhere: (title, description).
+pub(super) fn picker_text() -> (&'static str, &'static str) {
+    #[cfg(windows)]
+    // SAFETY: a plain query.
+    let language = unsafe { windows_sys::Win32::Globalization::GetUserDefaultUILanguage() };
+    #[cfg(not(windows))]
+    let language = 0x09u16;
+    const PORTUGUESE: u16 = 0x16;
+    if language & 0x3ff == PORTUGUESE {
+        (
+            "Seletor de conta",
+            "Conta local (offline). Mude o nome ou clique em OK:",
+        )
+    } else {
+        (
+            "Account picker",
+            "Local (offline) account. Change the name or press OK:",
+        )
+    }
+}
+
+/// The in-picture account picker's lines, in Portuguese on a Portuguese
+/// system and in English elsewhere.
+#[cfg(feature = "diagnostics")]
+fn picker_lines(name: &str) -> Vec<String> {
+    let (title, _) = picker_text();
+    let words: [&str; 4] = if title.starts_with("Seletor") {
+        ["Conta local (offline)", "A: jogar com esta conta", "B: cancelar", "O nome muda no launcher"]
+    } else {
+        ["Local (offline) account", "A: play with this account", "B: cancel", "Change the name in the launcher"]
+    };
+    vec![
+        title.to_owned(),
+        String::new(),
+        words[0].to_owned(),
+        format!("> {name}"),
+        String::new(),
+        words[1].to_owned(),
+        words[2].to_owned(),
+        String::new(),
+        words[3].to_owned(),
+    ]
+}
+
+/// The account picker drawn in the title's picture, answered with the pad or
+/// the keyboard (A or Enter: the account; B or Esc: cancel). `None` when it
+/// cannot be shown there (no frames presented or no input read yet): the
+/// host dialog asks instead. A title that stops presenting while it is open
+/// gets a cancel.
+#[cfg(feature = "diagnostics")]
+fn pick_in_picture(name: &str) -> Option<bool> {
+    use scarlett_gpu::prompt;
+    if !prompt::presenting() || !super::gameinput::polling() {
+        return None;
+    }
+    let lines = picker_lines(name);
+    prompt::show(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+    super::gameinput::begin_capture();
+    let answer = loop {
+        if let Some(answer) = super::gameinput::take_answer() {
+            break answer;
+        }
+        if !prompt::presenting() {
+            tracing::warn!("account picker: the title stopped presenting; cancelled");
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    super::gameinput::end_capture();
+    prompt::hide();
+    Some(answer)
+}
+
+/// The default user is added at once and silently. The account picker is
+/// drawn in the title's picture (`pick_in_picture`) or, where it cannot be,
+/// opens a host dialog with the one account (its name can be changed); either
+/// runs on a thread of its own. Choosing the account picks it; cancelling
+/// completes the call as cancelled (`E_ABORT`), as a console's picker does.
 extern "system" fn add_async(_: This, options: u32, block: *mut AsyncBlock) -> HRESULT {
+    if wants_picker(options) {
+        tracing::info!(options, "XUserAddAsync: the account picker");
+        return xasync::pending_with(block, (&raw const ADD).cast(), || {
+            let picked = || Ok((user() as usize).to_ne_bytes().to_vec());
+            #[cfg(feature = "diagnostics")]
+            if let Some(yes) = pick_in_picture(&gamertag()) {
+                tracing::info!(yes, "account picker (in the picture)");
+                return if yes { picked() } else { Err(xasync::E_ABORT) };
+            }
+            let (title, description) = picker_text();
+            match super::xgameui::ask(title, description, &gamertag(), GAMERTAG_MAX) {
+                Some(name) => {
+                    set_gamertag(&name);
+                    tracing::info!("account picker: the local user");
+                    picked()
+                }
+                None => {
+                    tracing::info!("account picker: cancelled");
+                    Err(xasync::E_ABORT)
+                }
+            }
+        });
+    }
     tracing::info!(options, "XUserAddAsync: the offline local user");
     xasync::XAsyncBegin(
         block,
@@ -182,10 +306,10 @@ extern "system" fn get_gamertag(
 ) -> HRESULT {
     const MODERN_SUFFIX: u32 = 2;
     let text = match component {
-        MODERN_SUFFIX => "",
+        MODERN_SUFFIX => String::new(),
         _ => gamertag(),
     };
-    put_string(text, size, buffer, used)
+    put_string(&text, size, buffer, used)
 }
 /// Granted; deny reason 0 (none).
 extern "system" fn check_privilege(
@@ -277,12 +401,25 @@ extern "system" fn unregister(_: This, _token: u64, _wait: bool) -> bool {
     true
 }
 
-/// No input device belongs to a user.
-extern "system" fn find_for_device(_: This, _device: *const c_void, _: *mut Handle) -> HRESULT {
-    USER_NOT_FOUND
+/// Every input device belongs to the one user. A title's "press A" screen
+/// asks whose the pad that pressed is; with no user it offers the account
+/// picker (Y), which is the system's UI on a console and does not exist here,
+/// so the title stayed on an empty screen with only the button hints.
+extern "system" fn find_for_device(_: This, device: *const c_void, out: *mut Handle) -> HRESULT {
+    if device.is_null() {
+        return xasync::E_INVALIDARG;
+    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| tracing::info!("XUserFindForDevice: the offline local user"));
+    put(out, user())
 }
 
-// Unset slots (no title seen calls them): maximum users, gamer pictures,
+/// One local user at most (`XUserGetMaxUsers`).
+extern "system" fn max_users(_: This, out: *mut u32) -> HRESULT {
+    put(out, 1)
+}
+
+// Unset slots (no title seen calls them): gamer pictures,
 // the UTF-16 token calls, issue resolution.
 static VTABLE: Methods<35> = Methods([
     missing::<0> as *const (),             // 0x00 QueryInterface
@@ -291,7 +428,7 @@ static VTABLE: Methods<35> = Methods([
     duplicate as *const (),                // 0x18
     close as *const (),                    // 0x20
     compare as *const (),                  // 0x28
-    missing::<6> as *const (),             // 0x30 maximum users
+    max_users as *const (),                // 0x30 maximum users
     add_async as *const (),                // 0x38
     add_result as *const (),               // 0x40
     get_local_id as *const (),             // 0x48
@@ -361,6 +498,74 @@ mod tests {
                 assert_eq!(&name[..used], expected, "component {component}");
             }
         }
+    }
+
+    #[test]
+    fn only_an_add_without_a_default_opens_the_picker() {
+        assert!(!wants_picker(ADD_DEFAULT_SILENTLY), "startup, silent");
+        assert!(!wants_picker(ADD_DEFAULT_ALLOWING_UI), "startup, UI only without a user");
+        assert!(!wants_picker(ADD_DEFAULT_SILENTLY | 0x2));
+        assert!(wants_picker(0), "the account picker");
+        assert!(wants_picker(0x2), "the account picker, guests allowed");
+    }
+
+    #[test]
+    fn names_follow_the_console_limit() {
+        assert_eq!(clean_name("  Ana  "), Some("Ana".into()));
+        assert_eq!(clean_name("   "), None);
+        assert_eq!(clean_name("abcdefghijklmnopq").unwrap().chars().count(), 15);
+    }
+
+    /// The picker's dialog dismissed (the tests' dialog cancels any title
+    /// not starting with "Type"): the add completes as cancelled, and the
+    /// name stays.
+    #[test]
+    fn a_dismissed_account_picker_cancels_the_add() {
+        type Add = extern "system" fn(This, u32, *mut AsyncBlock) -> HRESULT;
+        let before = gamertag();
+        let mut block = AsyncBlock {
+            queue: std::ptr::null(),
+            context: std::ptr::null_mut(),
+            callback: None,
+            internal: [0; 4],
+        };
+        assert_eq!(slot::<Add>(&OBJECT, 0x38)(&OBJECT, 0, &mut block), S_OK);
+        assert_eq!(xasync::XAsyncGetStatus(&mut block, true), xasync::E_ABORT);
+        assert_eq!(gamertag(), before);
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn the_picture_picker_names_the_account_and_its_buttons() {
+        let lines = picker_lines("Player");
+        assert!(lines.iter().any(|l| l == "> Player"));
+        assert!(lines.iter().any(|l| l.starts_with("A:")) && lines.iter().any(|l| l.starts_with("B:")));
+        assert!(lines.iter().all(|l| l.len() <= 64), "fits the box");
+    }
+
+    /// The "press A" screen: the pad that pressed belongs to the signed-in
+    /// user, the same handle `XUserAddAsync` gives.
+    #[test]
+    fn every_input_device_belongs_to_the_local_user() {
+        type FindForDevice = extern "system" fn(This, *const c_void, *mut Handle) -> HRESULT;
+        type MaxUsers = extern "system" fn(This, *mut u32) -> HRESULT;
+        let this: This = &DEVICE_OBJECT;
+        let find = slot::<FindForDevice>(&DEVICE_OBJECT, 0x18);
+        let device = [7u8; 32]; // an APP_LOCAL_DEVICE_ID
+        let mut handle = std::ptr::null();
+        assert_eq!(find(this, device.as_ptr().cast(), &mut handle), S_OK);
+        assert_eq!(handle, user());
+        assert_eq!(
+            find(this, std::ptr::null(), &mut handle),
+            xasync::E_INVALIDARG
+        );
+        assert_eq!(
+            find(this, device.as_ptr().cast(), std::ptr::null_mut()),
+            xasync::E_INVALIDARG
+        );
+        let mut most = 0;
+        assert_eq!(slot::<MaxUsers>(&OBJECT, 0x30)(&OBJECT, &mut most), S_OK);
+        assert_eq!(most, 1);
     }
 
     #[test]

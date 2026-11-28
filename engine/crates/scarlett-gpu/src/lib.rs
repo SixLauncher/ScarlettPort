@@ -59,6 +59,8 @@ mod land;
 pub mod list;
 pub mod object;
 pub mod pipeline;
+#[cfg(feature = "diagnostics")]
+pub mod prompt;
 #[cfg(windows)]
 mod picked;
 #[cfg(windows)]
