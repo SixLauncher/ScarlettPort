@@ -42,14 +42,17 @@ unsafe impl Send for Composer {}
 // SAFETY: as above.
 unsafe impl Sync for Composer {}
 
-fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<ID3DBlob> {
+/// `source`'s `entry` compiled for `target`; a failure carries the
+/// compiler's own message.
+fn compile(source: &str, entry: PCSTR, target: PCSTR) -> windows::core::Result<ID3DBlob> {
     let mut code: Option<ID3DBlob> = None;
-    // SAFETY: the source and names live through the call; the out pointer is
-    // ours.
-    unsafe {
+    let mut errors: Option<ID3DBlob> = None;
+    // SAFETY: the source and names live through the call; the out pointers
+    // are ours.
+    let compiled = unsafe {
         D3DCompile(
-            SOURCE.as_ptr().cast(),
-            SOURCE.len(),
+            source.as_ptr().cast(),
+            source.len(),
             s!("compose"),
             None,
             None,
@@ -58,17 +61,113 @@ fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<ID3DBlob> {
             0,
             0,
             &mut code,
-            None,
-        )?;
+            Some(&mut errors),
+        )
+    };
+    if let Err(e) = compiled {
+        // SAFETY: the blob's own bytes, alive while it is.
+        let message = errors.map(|b| unsafe {
+            String::from_utf8_lossy(std::slice::from_raw_parts(
+                b.GetBufferPointer().cast::<u8>(),
+                b.GetBufferSize(),
+            ))
+            .trim_end_matches('\0')
+            .trim()
+            .to_owned()
+        });
+        return Err(match message {
+            Some(m) if !m.is_empty() => windows::core::Error::new(e.code(), format!("{e}: {m}")),
+            _ => e,
+        });
     }
     code.ok_or_else(windows::core::Error::empty)
 }
 
+/// The composer's root signature (`RS` in [`SOURCE`]) made in code: a table
+/// of two SRVs (t0, t1) for the pixel shader and a linear clamp sampler at
+/// s0. For hosts whose HLSL compiler leaves out `[RootSignature]`: Wine's
+/// d3dcompiler_47 (vkd3d-shader), under Proton.
+fn root_in_code(device: &ID3D12Device) -> windows::core::Result<ID3D12RootSignature> {
+    let range = D3D12_DESCRIPTOR_RANGE {
+        RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+        NumDescriptors: 2,
+        BaseShaderRegister: 0,
+        RegisterSpace: 0,
+        OffsetInDescriptorsFromTableStart: D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND,
+    };
+    let parameter = D3D12_ROOT_PARAMETER {
+        ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+        Anonymous: D3D12_ROOT_PARAMETER_0 {
+            DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE {
+                NumDescriptorRanges: 1,
+                pDescriptorRanges: &range,
+            },
+        },
+        ShaderVisibility: D3D12_SHADER_VISIBILITY_PIXEL,
+    };
+    let sampler = D3D12_STATIC_SAMPLER_DESC {
+        Filter: D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        AddressU: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        AddressV: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        AddressW: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        MipLODBias: 0.0,
+        MaxAnisotropy: 16,
+        ComparisonFunc: D3D12_COMPARISON_FUNC_LESS_EQUAL,
+        BorderColor: D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE,
+        MinLOD: 0.0,
+        MaxLOD: f32::MAX,
+        ShaderRegister: 0,
+        RegisterSpace: 0,
+        ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+    };
+    let desc = D3D12_ROOT_SIGNATURE_DESC {
+        NumParameters: 1,
+        pParameters: &parameter,
+        NumStaticSamplers: 1,
+        pStaticSamplers: &sampler,
+        Flags: D3D12_ROOT_SIGNATURE_FLAG_NONE,
+    };
+    let mut blob: Option<ID3DBlob> = None;
+    // SAFETY: the description and what it points to live through the calls;
+    // the blob's bytes live while it does.
+    unsafe {
+        D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1_0, &mut blob, None)?;
+        let blob = blob.ok_or_else(windows::core::Error::empty)?;
+        device.CreateRootSignature(
+            0,
+            std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize()),
+        )
+    }
+}
+
 impl Composer {
+    /// Shader model 5.1 with the root signature inside the shaders (what
+    /// Windows' compiler makes); where that fails, shader model 5.0 and the
+    /// root signature made in code ([`root_in_code`]).
     pub(crate) fn new(host: &Host, format: DXGI_FORMAT) -> windows::core::Result<Self> {
+        match Self::build(host, format, SOURCE, (s!("vs_5_1"), s!("ps_5_1")), false) {
+            Ok(c) => Ok(c),
+            Err(first) => {
+                tracing::warn!(
+                    error = %first,
+                    "composer shaders with an embedded root signature not made; trying shader model 5.0 and a root signature made in code"
+                );
+                let plain = SOURCE.replace("[RootSignature(RS)]\n", "");
+                Self::build(host, format, &plain, (s!("vs_5_0"), s!("ps_5_0")), true)
+            }
+        }
+    }
+
+    fn build(
+        host: &Host,
+        format: DXGI_FORMAT,
+        source: &str,
+        (vs_target, ps_target): (PCSTR, PCSTR),
+        in_code: bool,
+    ) -> windows::core::Result<Self> {
         let (vs, ps) = (
-            compile(s!("vs"), s!("vs_5_1"))?,
-            compile(s!("ps"), s!("ps_5_1"))?,
+            compile(source, s!("vs"), vs_target)?,
+            compile(source, s!("ps"), ps_target)?,
         );
         // SAFETY: the blobs' own bytes, alive through the calls.
         unsafe {
@@ -76,7 +175,11 @@ impl Composer {
                 std::slice::from_raw_parts(b.GetBufferPointer().cast::<u8>(), b.GetBufferSize())
             };
             let device = &host.device;
-            let root: ID3D12RootSignature = device.CreateRootSignature(0, bytes(&vs))?;
+            let root: ID3D12RootSignature = if in_code {
+                root_in_code(device)?
+            } else {
+                device.CreateRootSignature(0, bytes(&vs))?
+            };
             let code = |b: &ID3DBlob| D3D12_SHADER_BYTECODE {
                 pShaderBytecode: b.GetBufferPointer(),
                 BytecodeLength: b.GetBufferSize(),
