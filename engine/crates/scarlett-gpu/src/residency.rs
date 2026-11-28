@@ -1,18 +1,24 @@
 ﻿//! Host-memory admission for speculative texture work and reusable upload storage.
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows_sys::Win32::System::SystemInformation::MEMORYSTATUSEX;
 
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
 static PRESSURED: AtomicBool = AtomicBool::new(false);
 static HEADROOM: AtomicU64 = AtomicU64::new(u64::MAX);
 
+/// The host's memory, cut to a Linux control group's ceilings under Wine
+/// (`scarlett_core::memstat`): the game's own limit, not the whole machine's.
 fn memory_status() -> Option<MEMORYSTATUSEX> {
-    // SAFETY: the API initializes the fields of a correctly sized structure.
-    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
-    status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
-    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some(status)
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        let groups = scarlett_core::memstat::limited_groups();
+        if !groups.is_empty() {
+            tracing::info!(?groups, "host memory: the Linux control group's ceilings count as the memory left");
+        }
+    });
+    scarlett_core::memstat::global_memory_status()
 }
 
 // The texture sweep may run for seconds inside a single submitted frame.

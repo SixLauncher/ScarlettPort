@@ -5,10 +5,12 @@
 //!   game-derived data into the source tree.
 //! * [`logging`]: one tracing setup for all binaries.
 //! * [`oom`]: the allocator that says so when memory runs out.
+//! * [`memstat`]: the memory left, with a Linux control group's ceilings (under Wine).
 
 pub mod config;
 pub mod env;
 pub mod logging;
+pub mod memstat;
 #[cfg(windows)]
 pub mod oom;
 pub mod policy;
