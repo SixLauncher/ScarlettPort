@@ -111,13 +111,18 @@ pub extern "system" fn CreateWindowExW(
     param: *const c_void,
 ) -> HWND {
     let (x, y, width, height) = fit(parent, x, y, width, height);
-    // SAFETY: the title's own arguments, forwarded (the size fitted).
+    let ex_style = ex_style_for(parent, ex_style, window_topmost());
+    // SAFETY: the title's own arguments, forwarded (the size fitted, no
+    // always-on-top unless asked for).
     let hwnd = unsafe {
         wm::CreateWindowExW(
             ex_style, class, name, style, x, y, width, height, parent, menu, instance, param,
         )
     };
     hook(hwnd);
+    if style & wm::WS_VISIBLE != 0 {
+        shown(hwnd, window_mode());
+    }
     hwnd
 }
 
@@ -137,13 +142,18 @@ pub extern "system" fn CreateWindowExA(
     param: *const c_void,
 ) -> HWND {
     let (x, y, width, height) = fit(parent, x, y, width, height);
-    // SAFETY: the title's own arguments, forwarded (the size fitted).
+    let ex_style = ex_style_for(parent, ex_style, window_topmost());
+    // SAFETY: the title's own arguments, forwarded (the size fitted, no
+    // always-on-top unless asked for).
     let hwnd = unsafe {
         wm::CreateWindowExA(
             ex_style, class, name, style, x, y, width, height, parent, menu, instance, param,
         )
     };
     hook(hwnd);
+    if style & wm::WS_VISIBLE != 0 {
+        shown(hwnd, window_mode());
+    }
     hwnd
 }
 
@@ -313,8 +323,177 @@ extern "system" fn window_proc(
     }
 }
 
+/// How the title's window opens (`SCARLETT_WINDOW_MODE`). F11 still toggles
+/// borderless fullscreen in every mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowMode {
+    /// As the title made it, shrunk to the screen (`SCARLETT_WINDOW_MAX`).
+    Windowed,
+    /// Maximized over the work area: the taskbar and panels stay visible.
+    Maximized,
+    /// Borderless fullscreen over its monitor, as F11 makes it.
+    Borderless,
+}
+
+fn parse_window_mode(value: &str) -> Option<WindowMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "windowed" | "window" => Some(WindowMode::Windowed),
+        "maximized" | "maximised" => Some(WindowMode::Maximized),
+        "borderless" | "fullscreen" => Some(WindowMode::Borderless),
+        _ => None,
+    }
+}
+
+fn window_mode() -> WindowMode {
+    static MODE: std::sync::OnceLock<WindowMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let Some(value) = std::env::var_os("SCARLETT_WINDOW_MODE") else {
+            return WindowMode::Windowed;
+        };
+        let mode = value.to_str().and_then(parse_window_mode);
+        if mode.is_none() {
+            tracing::warn!(
+                ?value,
+                "ignoring invalid SCARLETT_WINDOW_MODE; expected windowed, maximized or borderless"
+            );
+        }
+        mode.unwrap_or(WindowMode::Windowed)
+    })
+}
+
+/// `SCARLETT_WINDOW_TOPMOST=1`: the title's window may stay above every other
+/// window if the title asks for it. Off by default: a console title owns the
+/// screen and asks for it, which on a PC keeps it over every other program.
+fn window_topmost() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SCARLETT_WINDOW_TOPMOST").is_some_and(|v| v == "1"))
+}
+
+/// The extended style a window is made with: a top-level window loses
+/// `WS_EX_TOPMOST` unless `topmost` (child windows are left as they are).
+fn ex_style_for(parent: HWND, ex_style: u32, topmost: bool) -> u32 {
+    if parent.is_null() && !topmost && ex_style & wm::WS_EX_TOPMOST != 0 {
+        tracing::info!(ex_style, "title window made without always-on-top");
+        ex_style & !wm::WS_EX_TOPMOST
+    } else {
+        ex_style
+    }
+}
+
+/// The title's main window: the first top-level window it shows (the one
+/// the swap chain presents to). 0 until then.
+static MAIN: AtomicUsize = AtomicUsize::new(0);
+
+/// A top-level window the title shows, not a tool window.
+fn is_title_window(hwnd: HWND) -> bool {
+    // SAFETY: plain queries on a window handle (a stale one just fails).
+    unsafe {
+        !hwnd.is_null()
+            && wm::GetParent(hwnd).is_null()
+            && (wm::GetWindowLongW(hwnd, wm::GWL_EXSTYLE) as u32) & wm::WS_EX_TOOLWINDOW == 0
+            && (wm::GetWindowLongW(hwnd, wm::GWL_STYLE) as u32) & wm::WS_CHILD == 0
+    }
+}
+
+/// `hwnd` is being shown: the first title window shown becomes the main
+/// window, and the mode is applied to it once. Returns whether `hwnd` is the
+/// main window.
+fn shown(hwnd: HWND, mode: WindowMode) -> bool {
+    if !is_title_window(hwnd) {
+        return false;
+    }
+    let first = MAIN
+        .compare_exchange(0, hwnd as usize, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok();
+    if !first {
+        return MAIN.load(Ordering::SeqCst) == hwnd as usize;
+    }
+    tracing::info!(?mode, "title window shown");
+    apply_mode(hwnd, mode);
+    true
+}
+
+/// Puts `hwnd` in `mode`'s shape (on the thread that owns it).
+fn apply_mode(hwnd: HWND, mode: WindowMode) {
+    match mode {
+        WindowMode::Windowed => {}
+        // SAFETY: the title's window, on the thread that owns it.
+        WindowMode::Maximized => unsafe {
+            wm::ShowWindow(hwnd, wm::SW_SHOWMAXIMIZED);
+        },
+        WindowMode::Borderless => {
+            if !fullscreen() {
+                toggle_fullscreen(hwnd);
+            }
+        }
+    }
+}
+
+/// The show command a title's `ShowWindow` becomes: a plain show of the main
+/// window keeps it maximized in that mode (the title would restore it).
+fn show_command(cmd: i32, main: bool, mode: WindowMode) -> i32 {
+    let plain = [wm::SW_SHOWNORMAL, wm::SW_SHOW, wm::SW_SHOWDEFAULT, wm::SW_SHOWNA];
+    if main && mode == WindowMode::Maximized && plain.contains(&cmd) {
+        wm::SW_SHOWMAXIMIZED
+    } else {
+        cmd
+    }
+}
+
+/// `SetWindowPos` as the title asked, with two changes: no always-on-top
+/// (`HWND_TOPMOST` becomes `HWND_NOTOPMOST`) unless `topmost`, and the main
+/// window keeps the place and size the mode gave it (`kept`).
+fn position(after: HWND, flags: u32, topmost: bool, kept: bool) -> (HWND, u32) {
+    let after = if !topmost && after == wm::HWND_TOPMOST {
+        wm::HWND_NOTOPMOST
+    } else {
+        after
+    };
+    let flags = if kept { flags | wm::SWP_NOMOVE | wm::SWP_NOSIZE } else { flags };
+    (after, flags)
+}
+
+pub extern "system" fn ShowWindow(hwnd: HWND, cmd: i32) -> i32 {
+    let mode = window_mode();
+    let showing = cmd != wm::SW_HIDE && cmd != wm::SW_MINIMIZE && cmd != wm::SW_SHOWMINIMIZED;
+    let main = showing && shown(hwnd, mode);
+    // SAFETY: the title's own call, its command adjusted.
+    unsafe { wm::ShowWindow(hwnd, show_command(cmd, main, mode)) }
+}
+
+pub extern "system" fn SetWindowPos(
+    hwnd: HWND,
+    after: HWND,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    flags: u32,
+) -> i32 {
+    let mode = window_mode();
+    let main = if flags & wm::SWP_SHOWWINDOW != 0 {
+        shown(hwnd, mode)
+    } else {
+        MAIN.load(Ordering::SeqCst) == hwnd as usize
+    };
+    // SAFETY: a query on the title's window.
+    let kept = main
+        && (fullscreen() || (mode == WindowMode::Maximized && unsafe { wm::IsZoomed(hwnd) } != 0));
+    let (after, flags) = position(after, flags, window_topmost(), kept);
+    // SAFETY: the title's own call, adjusted as above.
+    unsafe { wm::SetWindowPos(hwnd, after, x, y, width, height, flags) }
+}
+
 /// The F11 key's virtual-key code.
 const VK_F11: usize = 0x7A;
+
+/// The window's style and placement before borderless fullscreen; `None` while
+/// windowed.
+static FULLSCREEN: Mutex<Option<(u32, wm::WINDOWPLACEMENT)>> = Mutex::new(None);
+
+fn fullscreen() -> bool {
+    FULLSCREEN.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
 
 /// Borderless fullscreen over the monitor the window is on, or back to the
 /// style and placement it had before. What the title draws is stretched to
@@ -323,9 +502,7 @@ fn toggle_fullscreen(hwnd: HWND) {
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
     };
-    // The window's style and placement before fullscreen; `None` while windowed.
-    static SAVED: Mutex<Option<(u32, wm::WINDOWPLACEMENT)>> = Mutex::new(None);
-    let mut saved = SAVED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut saved = FULLSCREEN.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: `hwnd` is the title's window, on the thread that owns it; the
     // structures are sized as the calls require.
     unsafe {
@@ -511,6 +688,8 @@ pub(crate) fn module() -> HleModule {
             hle_export!(UnregisterAppConstrainedChangeNotification),
             hle_export!(CreateWindowExW),
             hle_export!(CreateWindowExA),
+            hle_export!(ShowWindow),
+            hle_export!(SetWindowPos),
         ],
     }
 }
@@ -643,6 +822,142 @@ mod tests {
             assert_eq!(parse_window_limit(bad), None, "{bad}");
         }
     }
+
+    #[test]
+    fn window_modes_are_read_from_their_names() {
+        assert_eq!(parse_window_mode("windowed"), Some(WindowMode::Windowed));
+        assert_eq!(parse_window_mode(""), Some(WindowMode::Windowed));
+        assert_eq!(parse_window_mode(" Maximized "), Some(WindowMode::Maximized));
+        assert_eq!(parse_window_mode("borderless"), Some(WindowMode::Borderless));
+        assert_eq!(parse_window_mode("fullscreen"), Some(WindowMode::Borderless));
+        assert_eq!(parse_window_mode("exclusive"), None);
+    }
+
+    #[test]
+    fn top_level_windows_lose_always_on_top_unless_asked() {
+        let null = std::ptr::null_mut();
+        let ex = wm::WS_EX_TOPMOST | wm::WS_EX_APPWINDOW;
+        assert_eq!(ex_style_for(null, ex, false), wm::WS_EX_APPWINDOW);
+        assert_eq!(ex_style_for(null, ex, true), ex, "SCARLETT_WINDOW_TOPMOST=1 keeps it");
+        let parent = 0x1234 as HWND;
+        assert_eq!(ex_style_for(parent, ex, false), ex, "child windows are left alone");
+    }
+
+    #[test]
+    fn set_window_pos_drops_topmost_and_keeps_the_modes_shape() {
+        let after = wm::HWND_TOPMOST;
+        assert_eq!(position(after, 0, false, false), (wm::HWND_NOTOPMOST, 0));
+        assert_eq!(position(after, 0, true, false), (wm::HWND_TOPMOST, 0));
+        assert_eq!(position(wm::HWND_TOP, 0, false, false), (wm::HWND_TOP, 0));
+        let (_, flags) = position(wm::HWND_TOP, wm::SWP_SHOWWINDOW, false, true);
+        assert_eq!(flags, wm::SWP_SHOWWINDOW | wm::SWP_NOMOVE | wm::SWP_NOSIZE);
+    }
+
+    #[test]
+    fn a_plain_show_keeps_the_main_window_maximized() {
+        use WindowMode::*;
+        assert_eq!(show_command(wm::SW_SHOWNORMAL, true, Maximized), wm::SW_SHOWMAXIMIZED);
+        assert_eq!(show_command(wm::SW_SHOW, true, Maximized), wm::SW_SHOWMAXIMIZED);
+        assert_eq!(show_command(wm::SW_SHOWNORMAL, false, Maximized), wm::SW_SHOWNORMAL);
+        assert_eq!(show_command(wm::SW_SHOWNORMAL, true, Windowed), wm::SW_SHOWNORMAL);
+        assert_eq!(show_command(wm::SW_HIDE, true, Maximized), wm::SW_HIDE);
+    }
+
+    /// A real window made through our hook with `WS_EX_TOPMOST` comes out
+    /// without it.
+    #[test]
+    fn a_title_window_asking_for_topmost_is_made_without_it() {
+        let null = std::ptr::null_mut();
+        let hwnd = CreateWindowExW(
+            wm::WS_EX_TOPMOST,
+            w!("STATIC"),
+            w!("topmost"),
+            wm::WS_OVERLAPPEDWINDOW,
+            0,
+            0,
+            200,
+            100,
+            null,
+            null,
+            null,
+            std::ptr::null(),
+        );
+        assert!(!hwnd.is_null());
+        // SAFETY: our window.
+        unsafe {
+            let ex = wm::GetWindowLongW(hwnd, wm::GWL_EXSTYLE) as u32;
+            assert_eq!(ex & wm::WS_EX_TOPMOST, 0, "extended style {ex:#x}");
+            wm::DestroyWindow(hwnd);
+        }
+    }
+
+    /// The window modes on real windows: maximized fills the work area,
+    /// borderless loses its frame and covers its monitor, and F11's toggle
+    /// brings it back.
+    #[test]
+    fn window_modes_shape_a_real_window() {
+        use windows_sys::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+        };
+        let _one = FULLSCREEN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let null = std::ptr::null_mut();
+        let make = || {
+            let hwnd = CreateWindowExW(
+                0,
+                w!("STATIC"),
+                w!("mode"),
+                wm::WS_OVERLAPPEDWINDOW,
+                10,
+                10,
+                320,
+                200,
+                null,
+                null,
+                null,
+                std::ptr::null(),
+            );
+            assert!(!hwnd.is_null());
+            hwnd
+        };
+        // SAFETY: our windows, on this thread; the structures are sized as
+        // the calls require.
+        unsafe {
+            let hwnd = make();
+            apply_mode(hwnd, WindowMode::Maximized);
+            assert_ne!(wm::IsZoomed(hwnd), 0, "maximized");
+            wm::DestroyWindow(hwnd);
+
+            let hwnd = make();
+            apply_mode(hwnd, WindowMode::Borderless);
+            assert!(fullscreen());
+            let style = wm::GetWindowLongW(hwnd, wm::GWL_STYLE) as u32;
+            assert_ne!(style & wm::WS_POPUP, 0, "style {style:#x}");
+            assert_eq!(style & wm::WS_CAPTION, 0, "style {style:#x}");
+            let mut info: MONITORINFO = std::mem::zeroed();
+            info.cbSize = size_of::<MONITORINFO>() as u32;
+            GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info);
+            let mut rect = RECT::default();
+            wm::GetWindowRect(hwnd, &mut rect);
+            assert_eq!(
+                (rect.left, rect.top, rect.right, rect.bottom),
+                (
+                    info.rcMonitor.left,
+                    info.rcMonitor.top,
+                    info.rcMonitor.right,
+                    info.rcMonitor.bottom
+                ),
+                "covers the monitor"
+            );
+            toggle_fullscreen(hwnd);
+            assert!(!fullscreen(), "F11 brings the window back");
+            let style = wm::GetWindowLongW(hwnd, wm::GWL_STYLE) as u32;
+            assert_ne!(style & wm::WS_CAPTION, 0, "frame back: {style:#x}");
+            wm::DestroyWindow(hwnd);
+        }
+    }
+
+    /// The fullscreen state is the process's: one test at a time uses it.
+    static FULLSCREEN_TESTS: Mutex<()> = Mutex::new(());
 
     #[test]
     fn hooked_windows_still_reach_the_title_procedure() {
