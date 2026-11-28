@@ -9159,6 +9159,9 @@ struct Presenter {
     composer: Option<crate::compose::Composer>,
     #[cfg(feature = "diagnostics")]
     panel: panel::Panel,
+    /// The runtime's question to the player (`crate::prompt`).
+    #[cfg(feature = "diagnostics")]
+    prompt: panel::Prompt,
 }
 
 /// The frame rate, shown in the window's caption every second and logged
@@ -9721,6 +9724,8 @@ impl Host {
             };
             #[cfg(feature = "diagnostics")]
             p.panel.draw(self, copy, &back, (width, height), format);
+            #[cfg(feature = "diagnostics")]
+            p.prompt.draw(self, copy, &back, (width, height), format);
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
             if composed {
@@ -9825,6 +9830,8 @@ impl Host {
                 composer: None,
                 #[cfg(feature = "diagnostics")]
                 panel: panel::Panel::new(),
+                #[cfg(feature = "diagnostics")]
+                prompt: panel::Prompt::new(),
             })
         }
     }

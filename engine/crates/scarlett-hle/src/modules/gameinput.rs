@@ -271,6 +271,96 @@ struct KeyState {
 
 const _: () = assert!(size_of::<KeyState>() == 12 && size_of::<PadState>() == 28);
 
+/// The runtime's own question to the player (the account picker, drawn over
+/// the title's picture) takes the pads and the keyboard while it is open: A or
+/// Enter answers yes, B, Esc or Backspace no, and the title sees nothing
+/// pressed. It only listens once nothing is held (the button that opened it
+/// does not answer it), and after the answer it holds on until the player lets
+/// go (the button that answered it does not reach the title).
+#[derive(Debug, Default)]
+struct Capture {
+    /// Nothing was held since it opened: a press now answers.
+    armed: bool,
+    answer: Option<bool>,
+    /// Answered and given back: it ends once nothing is held.
+    ending: bool,
+}
+
+/// The open question's state: the process's (the poll thread reads it, the
+/// question's thread sets it); each test thread's own in tests, which poll
+/// side by side.
+#[cfg(not(test))]
+static CAPTURE: Mutex<Option<Capture>> = Mutex::new(None);
+#[cfg(not(test))]
+fn with_capture<R>(f: impl FnOnce(&mut Option<Capture>) -> R) -> R {
+    f(&mut lock(&CAPTURE))
+}
+#[cfg(test)]
+thread_local! {
+    static CAPTURE: std::cell::RefCell<Option<Capture>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn with_capture<R>(f: impl FnOnce(&mut Option<Capture>) -> R) -> R {
+    CAPTURE.with(|c| f(&mut c.borrow_mut()))
+}
+
+/// Takes the input for the runtime's question.
+pub(crate) fn begin_capture() {
+    with_capture(|c| *c = Some(Capture::default()));
+}
+
+/// The player's answer, once (true: yes).
+pub(crate) fn take_answer() -> Option<bool> {
+    with_capture(|c| c.as_mut().and_then(|c| c.answer.take()))
+}
+
+/// Gives the input back to the title once nothing is held.
+pub(crate) fn end_capture() {
+    with_capture(|c| {
+        if let Some(c) = c.as_mut() {
+            c.ending = true;
+        }
+    });
+}
+
+/// While a question is open: reads its answer from what is held and leaves
+/// the title nothing pressed. Whether it took the input.
+fn captured(pads: &mut [Option<PadState>; PADS], keys: &mut Vec<KeyState>) -> bool {
+    *lock(&POLLED) = Some(Instant::now());
+    with_capture(|capture| take_input(capture, pads, keys))
+}
+
+/// When the host input was last read (the title made GameInput and its poll
+/// runs): a question asked in the picture can only be answered then.
+static POLLED: Mutex<Option<Instant>> = Mutex::new(None);
+
+pub(crate) fn polling() -> bool {
+    lock(&POLLED).is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+}
+
+fn take_input(capture: &mut Option<Capture>, pads: &mut [Option<PadState>; PADS], keys: &mut Vec<KeyState>) -> bool {
+    let Some(c) = capture.as_mut() else { return false };
+    let buttons = pads.iter().flatten().fold(0, |b, p| b | p.buttons);
+    let key = |vk: u8| keys.iter().any(|k| k.virtual_key == vk);
+    let yes = buttons & A != 0 || key(0x0D);
+    let no = buttons & B != 0 || key(0x1B) || key(0x08);
+    let held = buttons != 0 || !keys.is_empty();
+    if c.ending && !held {
+        *capture = None;
+        return false;
+    }
+    if !c.armed {
+        c.armed = !yes && !no;
+    } else if c.answer.is_none() && !c.ending && (yes || no) {
+        c.answer = Some(yes);
+    }
+    for pad in pads.iter_mut().flatten() {
+        *pad = PadState::default();
+    }
+    keys.clear();
+    true
+}
+
 /// Host input, or a fake in tests.
 trait Source: Send {
     /// The pad in host slot `slot`, `None` when the slot is empty.
@@ -631,7 +721,7 @@ impl Hub {
 
     /// Reads the host once; device callbacks run on the calling thread.
     fn poll(&self) {
-        let (pads, mut keys, mouse) = {
+        let (mut pads, mut keys, mut mouse) = {
             let mut source = lock(&self.source);
             let mut pads: [_; PADS] = std::array::from_fn(|slot| source.pad(slot));
             // `SCARLETT_KBM=1` owns the mouse (`mouse_pad`); the plain
@@ -648,6 +738,9 @@ impl Hub {
             (pads, keys, mouse)
         };
         scripted_input(&mut keys);
+        if captured(&mut pads, &mut keys) {
+            mouse = PadState::default();
+        }
         let events = self
             .state()
             .poll(&self.devices, self.one_pad, pads, keys, mouse);
@@ -1898,6 +1991,40 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    /// The account picker's input: the held Y that opened it does not answer,
+    /// A does, the title sees nothing pressed throughout, and the input comes
+    /// back only once A is let go.
+    #[test]
+    fn a_question_takes_the_input_until_answered_and_let_go() {
+        let pad = |buttons| [Some(PadState { buttons, ..Default::default() }), None, None, None];
+        let poll = |buttons: u32| {
+            let mut pads = pad(buttons);
+            let mut keys = Vec::new();
+            let took = captured(&mut pads, &mut keys);
+            (took, pads[0].unwrap().buttons)
+        };
+        begin_capture();
+        assert_eq!(poll(Y), (true, 0), "Y still held: taken, not an answer");
+        assert_eq!(take_answer(), None);
+        assert_eq!(poll(0), (true, 0));
+        assert_eq!(poll(A), (true, 0), "A answers; the title sees nothing");
+        assert_eq!(take_answer(), Some(true));
+        end_capture();
+        assert_eq!(poll(A), (true, 0), "A still held after the answer: still taken");
+        assert_eq!(poll(0), (false, 0), "let go: the input is the title's again");
+        assert_eq!(poll(A), (false, A));
+        begin_capture();
+        let (mut pads, mut keys) = ([None; PADS], vec![KeyState { virtual_key: 0x1B, ..Default::default() }]);
+        assert!(captured(&mut pads, &mut keys), "Esc held at open");
+        let (mut pads, mut keys) = ([None; PADS], Vec::new());
+        captured(&mut pads, &mut keys);
+        let (mut pads, mut keys) = ([None; PADS], vec![KeyState { virtual_key: 0x1B, ..Default::default() }]);
+        captured(&mut pads, &mut keys);
+        assert!(keys.is_empty(), "the title sees no keys");
+        assert_eq!(take_answer(), Some(false), "Esc cancels");
+        with_capture(|c| *c = None);
+    }
     use crate::HleResolver;
     use crate::HostPolicy;
     use scarlett_loader::Provenance;

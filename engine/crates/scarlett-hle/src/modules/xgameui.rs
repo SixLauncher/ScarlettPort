@@ -125,14 +125,14 @@ fn limit(typed: &str, max: u32) -> String {
 
 /// Asks the user in a modal host dialog; `None` if dismissed.
 #[cfg(not(test))]
-fn ask(title: &str, description: &str, default: &str, max: u32) -> Option<String> {
+pub(super) fn ask(title: &str, description: &str, default: &str, max: u32) -> Option<String> {
     dialog::ask(title, description, default, max)
 }
 
 /// Tests answer for the user: "typed" for a title starting with "Type",
 /// cancelled otherwise.
 #[cfg(test)]
-fn ask(title: &str, _: &str, default: &str, _: u32) -> Option<String> {
+pub(super) fn ask(title: &str, _: &str, default: &str, _: u32) -> Option<String> {
     title.starts_with("Type").then(|| format!("{default}typed"))
 }
 
@@ -390,4 +390,15 @@ mod tests {
             assert_eq!(result(this, &mut b, size, out.as_mut_ptr(), used), S_OK);
         }
     }
+
+    /// The account picker's real dialog, to look at by hand (ignored: it
+    /// waits for a person). Prints what was chosen.
+    #[test]
+    #[ignore]
+    fn the_account_picker_dialog_opens() {
+        let (title, description) = super::super::xuser::picker_text();
+        let chosen = super::dialog::ask(title, description, "Player", 15);
+        eprintln!("account picker chose {chosen:?}");
+    }
+
 }
