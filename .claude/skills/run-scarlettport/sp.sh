@@ -11,8 +11,27 @@
 #                               GPU-free crates; scarlett-gpu gets the diagnostics feature)
 #
 # Env: SP_PROTON (Proton folder, default ~/.steam/root/steamapps/common/Proton - Experimental),
-#      SP_COMPAT (throwaway prefix, default /tmp/scarlett-smoke-compat).
+#      SP_COMPAT (throwaway prefix, default /tmp/scarlett-smoke-compat),
+#      SP_WITH_GAME=1 (build/test even while a game runs), CARGO_BUILD_JOBS (default 8).
 set -euo pipefail
+
+# Memory. `build` and `test` (release rustc x 24 jobs, then D3D12 devices under Proton) next to
+# a running game (~9 GB in its scope plus 3-4 GB of NVIDIA driver memory no cgroup counts) filled
+# the 16 GB of RAM and the zram swap twice on 2026-11-28: systemd-oomd then killed the whole
+# desktop session, where the uncapped build ran. So: not while a game runs, fewer jobs, and in a
+# capped scope of their own, where past the ceiling only the build is killed.
+if [[ -z ${SP_SCOPED:-} && ( ${1:-} == build || ${1:-} == test ) ]]; then
+  if [[ -z ${SP_WITH_GAME:-} ]] && { systemctl --user list-units 'sixlauncher-game-*' --state=running --plain --no-legend 2>/dev/null | grep -q . || pgrep -f 'scarlett\.exe run' >/dev/null; }; then
+    echo "sp.sh: a game is running: close it before building or testing (or SP_WITH_GAME=1)" >&2
+    exit 3
+  fi
+  ram=$(awk '/^MemTotal:/{print $2 * 1024}' /proc/meminfo)
+  if systemd-run --user --scope --quiet --collect true 2>/dev/null; then
+    exec env SP_SCOPED=1 systemd-run --user --scope --quiet --collect --unit="sp-$1-$$" \
+      -p MemoryHigh=$((ram * 45 / 100)) -p MemoryMax=$((ram / 2)) -p MemorySwapMax=$((ram / 8)) "$0" "$@"
+  fi
+fi
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-8}
 
 UNIT=$(cd "$(dirname "$0")/../../.." && pwd)
 ENGINE=$UNIT/engine
@@ -65,6 +84,8 @@ case ${1:-} in
     cd "$ENGINE"
     mapfile -t exes < <(cargo xwin test --release --locked --target $TARGET --lib --no-run "${feats[@]}" \
         $(printf -- '-p %s ' "${crates[@]}") 2>&1 | sed -nE 's/.*Executable .*\((.*\.exe)\)/\1/p')
+    # No test program: the build failed (its errors were filtered out above). Not a pass.
+    ((${#exes[@]})) || { echo "sp.sh: the tests did not build (cargo xwin test --no-run for the errors)" >&2; exit 1; }
     fail=0
     for t in "${exes[@]}"; do
       echo "== $(basename "$t")"
