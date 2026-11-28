@@ -31,6 +31,32 @@ float4 ps(V v) : SV_Target {
 }
 "#;
 
+/// [`SOURCE`] for Wine's HLSL compiler (vkd3d-shader), shader model 5.0 with
+/// the root signature made in code. The same image, in plainer HLSL: no
+/// integer arithmetic in the vertex shader, and the pixel shader takes its
+/// coordinates from its own position over the base plane's size rather than
+/// from an interpolant. Under Proton, [`SOURCE`] compiled this way showed the
+/// whole screen in one colour (white): these leave out what Wine's compiler is
+/// likeliest to get wrong.
+const SOURCE_PLAIN: &str = r#"
+Texture2D<float4> scene : register(t0);
+Texture2D<float4> over : register(t1);
+SamplerState smooth_ : register(s0);
+float4 vs(uint id : SV_VertexID) : SV_Position {
+    float x = id == 1 ? 3.0 : -1.0;
+    float y = id == 2 ? -3.0 : 1.0;
+    return float4(x, y, 0.0, 1.0);
+}
+float4 ps(float4 at : SV_Position) : SV_Target {
+    float w, h;
+    scene.GetDimensions(w, h);
+    float2 uv = at.xy / float2(w, h);
+    float4 s = scene.SampleLevel(smooth_, uv, 0);
+    float4 o = over.SampleLevel(smooth_, uv, 0);
+    return float4(saturate(o.rgb + s.rgb * (1.0 - saturate(o.a))), 1.0);
+}
+"#;
+
 pub(crate) struct Composer {
     root: ID3D12RootSignature,
     pso: ID3D12PipelineState,
@@ -143,7 +169,7 @@ fn root_in_code(device: &ID3D12Device) -> windows::core::Result<ID3D12RootSignat
 impl Composer {
     /// Shader model 5.1 with the root signature inside the shaders (what
     /// Windows' compiler makes); where that fails, shader model 5.0 and the
-    /// root signature made in code ([`root_in_code`]).
+    /// root signature made in code ([`root_in_code`]) for [`SOURCE_PLAIN`].
     pub(crate) fn new(host: &Host, format: DXGI_FORMAT) -> windows::core::Result<Self> {
         match Self::build(host, format, SOURCE, (s!("vs_5_1"), s!("ps_5_1")), false) {
             Ok(c) => Ok(c),
@@ -152,8 +178,13 @@ impl Composer {
                     error = %first,
                     "composer shaders with an embedded root signature not made; trying shader model 5.0 and a root signature made in code"
                 );
-                let plain = SOURCE.replace("[RootSignature(RS)]\n", "");
-                Self::build(host, format, &plain, (s!("vs_5_0"), s!("ps_5_0")), true)
+                Self::build(
+                    host,
+                    format,
+                    SOURCE_PLAIN,
+                    (s!("vs_5_0"), s!("ps_5_0")),
+                    true,
+                )
             }
         }
     }
