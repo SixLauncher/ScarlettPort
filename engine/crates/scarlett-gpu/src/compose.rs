@@ -33,24 +33,28 @@ float4 ps(V v) : SV_Target {
 
 /// [`SOURCE`] for Wine's HLSL compiler (vkd3d-shader), shader model 5.0 with
 /// the root signature made in code. The same image, in plainer HLSL: no
-/// integer arithmetic in the vertex shader, and the pixel shader takes its
-/// coordinates from its own position over the base plane's size rather than
-/// from an interpolant. Under Proton, [`SOURCE`] compiled this way showed the
-/// whole screen in one colour (white): these leave out what Wine's compiler is
-/// likeliest to get wrong.
+/// integer arithmetic in the vertex shader (the corner and its texture
+/// coordinate from comparisons, not shifts and masks).
+///
+/// The texture coordinate is interpolated over the whole output, as in
+/// [`SOURCE`]. An earlier version divided the pixel's position by the base
+/// plane's size instead: the base plane (the scene) is usually smaller than the
+/// output, so the coordinate went past 1 over most of the screen and the
+/// clamped samplers repeated one edge texel everywhere, the whole screen in one
+/// colour (white).
 const SOURCE_PLAIN: &str = r#"
 Texture2D<float4> scene : register(t0);
 Texture2D<float4> over : register(t1);
 SamplerState smooth_ : register(s0);
-float4 vs(uint id : SV_VertexID) : SV_Position {
-    float x = id == 1 ? 3.0 : -1.0;
-    float y = id == 2 ? -3.0 : 1.0;
-    return float4(x, y, 0.0, 1.0);
+struct V { float4 at : SV_Position; float2 uv : TEXCOORD0; };
+V vs(uint id : SV_VertexID) {
+    V v;
+    v.uv = float2(id == 1 ? 2.0 : 0.0, id == 2 ? 2.0 : 0.0);
+    v.at = float4(v.uv.x * 2.0 - 1.0, 1.0 - v.uv.y * 2.0, 0.0, 1.0);
+    return v;
 }
-float4 ps(float4 at : SV_Position) : SV_Target {
-    float w, h;
-    scene.GetDimensions(w, h);
-    float2 uv = at.xy / float2(w, h);
+float4 ps(V v) : SV_Target {
+    float2 uv = v.uv;
     float4 s = scene.SampleLevel(smooth_, uv, 0);
     float4 o = over.SampleLevel(smooth_, uv, 0);
     return float4(saturate(o.rgb + s.rgb * (1.0 - saturate(o.a))), 1.0);
@@ -355,7 +359,26 @@ mod tests {
             return;
         };
         let format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        let mut compositor = Composer::new(host, format).unwrap();
+        composes(host, Composer::new(host, format).unwrap(), format);
+    }
+
+    /// The fallback Wine's compiler gets ([`SOURCE_PLAIN`]), made on purpose so
+    /// that it is checked where the first way works too. The base plane is
+    /// smaller than the output, as the scene is in a title: the image must not
+    /// shift, nor turn into the colour of one edge texel.
+    #[test]
+    fn the_wine_fallback_composes_the_same_image() {
+        let Some(host) = crate::host::host() else {
+            eprintln!("skipping display-plane readback: no D3D12 device");
+            return;
+        };
+        let format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        let plain = Composer::build(host, format, SOURCE_PLAIN, (s!("vs_5_0"), s!("ps_5_0")), true)
+            .unwrap();
+        composes(host, plain, format);
+    }
+
+    fn composes(host: &Host, mut compositor: Composer, format: DXGI_FORMAT) {
         let list = host.new_list().unwrap();
         let texture = |width: u64| -> ID3D12Resource {
             let mut resource = None;
