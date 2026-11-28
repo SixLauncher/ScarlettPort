@@ -127,15 +127,10 @@ pub(crate) fn long_ago(moment: u64, ms: u64, frames: u64) -> bool {
     (now >> 32).saturating_sub(moment >> 32) >= frames && tenths * 100 >= ms
 }
 
-/// Available physical RAM on the host in bytes, from `GlobalMemoryStatusEx`.
+/// Available physical RAM on the host in bytes, from `GlobalMemoryStatusEx`
+/// cut to a Linux control group's ceiling under Wine (`scarlett_core::memstat`).
 pub(crate) fn available_physical_ram() -> Option<u64> {
-    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-    // SAFETY: plain data the call fills in.
-    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
-    m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
-    // SAFETY: a sized structure.
-    let ok = unsafe { GlobalMemoryStatusEx(&mut m) } != 0;
-    ok.then_some(m.ullAvailPhys)
+    scarlett_core::memstat::global_memory_status().map(|m| m.ullAvailPhys)
 }
 
 /// How long host copies of textures the title fills must have been idle to
@@ -1377,7 +1372,7 @@ pub(crate) fn compile(
     entry: windows::core::PCSTR,
     target: windows::core::PCSTR,
 ) -> windows::core::Result<Vec<u8>> {
-    use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
+    use crate::hlsl::D3DCompile;
     use windows::Win32::Graphics::Direct3D::ID3DBlob;
     let mut code: Option<ID3DBlob> = None;
     let mut errors: Option<ID3DBlob> = None;
@@ -2054,7 +2049,9 @@ cbuffer Span : register(b0) {
 ByteAddressBuffer now : register(t0);
 // 16 bytes per piece of the copy: the hash of its bytes when they were
 // last sent up (or hashed whole, the first time).
-RWByteAddressBuffer hashes : register(u0);
+// A structured buffer, not a byte-address one: Wine's HLSL compiler (Proton) has no loads from
+// a RWByteAddressBuffer (E5005), and without this shader no copy was kept in the card's memory.
+RWStructuredBuffer<uint4> hashes : register(u0);
 RWByteAddressBuffer differs : register(u1);
 groupshared uint4 parts[64];
 [RootSignature(RS)]
@@ -2113,12 +2110,12 @@ void main(uint3 id : SV_GroupID, uint thread : SV_GroupIndex) {
     if (compare != 0u) {
         // The flag, and above it 31 bits of the hash (`torn`).
         uint folded = h.x ^ (h.y * 3u) ^ (h.z * 5u) ^ (h.w * 7u);
-        differs.Store(out_at + id.x * 4u, (folded << 1u) | (any(h != hashes.Load4(piece * 16u)) ? 1u : 0u));
+        differs.Store(out_at + id.x * 4u, (folded << 1u) | (any(h != hashes[piece]) ? 1u : 0u));
         // With the copy-back on its own thread: the next compare of the
         // piece finds what is written from here on.
-        if (compare == 2u) hashes.Store4(piece * 16u, h);
+        if (compare == 2u) hashes[piece] = h;
     } else {
-        hashes.Store4(piece * 16u, h);
+        hashes[piece] = h;
     }
 }
 "#;
@@ -4316,7 +4313,7 @@ impl Host {
     }
 
     fn make_card_work(&self) -> windows::core::Result<CardWork> {
-        use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
+        use crate::hlsl::D3DCompile;
         use windows::Win32::Graphics::Direct3D::ID3DBlob;
         let mut code: Option<ID3DBlob> = None;
         // SAFETY: the source and names live through the call; the out

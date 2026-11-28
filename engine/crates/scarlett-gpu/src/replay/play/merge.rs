@@ -9,7 +9,7 @@
 //! CPU to a buffer the card writes, words the card has written since the
 //! start of the frame (which are not what was last put there) stay.
 
-use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
+use crate::hlsl::D3DCompile;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 
 use super::*;
@@ -18,28 +18,30 @@ const SOURCE: &str = r#"
 #define RS "RootConstants(num32BitConstants=2, b0), SRV(t0), UAV(u0), UAV(u1), UAV(u2)"
 cbuffer C : register(b0) { uint words; uint call; };
 ByteAddressBuffer from : register(t0);
-RWByteAddressBuffer to : register(u0);
-RWByteAddressBuffer base : register(u1);
+// Structured, not byte-address: Wine's HLSL compiler (Proton) has no loads from a
+// RWByteAddressBuffer (E5005).
+RWStructuredBuffer<uint> to : register(u0);
+RWStructuredBuffer<uint> base : register(u1);
 // For each call: words put, words of the card's left that were to get
 // another value, and of those the ones that were to get back what stood
 // there before the card wrote.
-RWByteAddressBuffer counts : register(u2);
+RWStructuredBuffer<uint> counts : register(u2);
 [RootSignature(RS)]
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= words) return;
     uint at = id.x * 4;
-    uint v = from.Load(at), now = to.Load(at), was = base.Load(at), n;
+    uint v = from.Load(at), now = to[id.x], was = base[id.x], n;
     if (now != was) {
         if (v == now) return;
-        counts.InterlockedAdd(call * 12 + 4, 1, n);
-        if (v == was) counts.InterlockedAdd(call * 12 + 8, 1, n);
+        InterlockedAdd(counts[(call * 12 + 4) / 4], 1, n);
+        if (v == was) InterlockedAdd(counts[(call * 12 + 8) / 4], 1, n);
         return;
     }
     if (v == now) return;
-    counts.InterlockedAdd(call * 12, 1, n);
-    to.Store(at, v);
-    base.Store(at, v);
+    InterlockedAdd(counts[(call * 12) / 4], 1, n);
+    to[id.x] = v;
+    base[id.x] = v;
 }
 "#;
 

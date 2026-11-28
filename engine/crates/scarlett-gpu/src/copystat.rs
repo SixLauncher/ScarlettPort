@@ -516,13 +516,7 @@ pub(crate) fn process_memory() -> (u64, u64) {
 /// The PC's memory in bytes: physical memory free, and what is left to
 /// commit.
 fn system_memory() -> (u64, u64) {
-    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-    // SAFETY: plain data the call fills in.
-    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
-    m.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
-    // SAFETY: a sized structure.
-    unsafe { GlobalMemoryStatusEx(&mut m) };
-    (m.ullAvailPhys, m.ullAvailPageFile)
+    scarlett_core::memstat::global_memory_status().map_or((0, 0), |m| (m.ullAvailPhys, m.ullAvailPageFile))
 }
 
 /// Whether the address space is walked for the memory map line

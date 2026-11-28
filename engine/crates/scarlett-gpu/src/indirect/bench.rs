@@ -80,7 +80,7 @@ ByteAddressBuffer count_buf : register(t1);
 RWByteAddressBuffer dst_args : register(u0);
 // The list's work so far (vertex instances, threads): past the budget,
 // records run empty.
-RWByteAddressBuffer budget : register(u1);
+RWStructuredBuffer<uint> budget : register(u1);
 static const uint BUDGET = 1u << 27;
 // Groups of one dispatch; more run empty.
 static const uint GROUPS = 1u << 20;
@@ -128,8 +128,8 @@ if (kind <= 1) {
     // Diagnostics, in the budget buffer's next words: the largest
     // group count a mesh record asked for, and the groups asked in all.
     uint was;
-    budget.InterlockedMax(4, g.x, was);
-    budget.InterlockedAdd(8, min(g.x, 1u << 24), was);
+    InterlockedMax(budget[1], g.x, was);
+    InterlockedAdd(budget[2], min(g.x, 1u << 24), was);
     g = uint3(min(g.x, 65535u), min(g.y, 1u), min(g.z, 1u));
     cost = g.x * g.y * g.z * 128u;
     groups = g;
@@ -137,12 +137,15 @@ if (kind <= 1) {
 bool over = false;
 if (cost > 0) {
     uint before;
-    budget.InterlockedOr(0, 0, before);
+    // An atomic read (adding 0). `budget` is a RWStructuredBuffer<uint> and the atomics are the
+    // intrinsics: Wine's HLSL compiler (Proton) has no atomic methods on RWByteAddressBuffer
+    // (E5005), and without this shader every indirect draw was dropped (a black scene).
+    InterlockedAdd(budget[0], 0, before);
     [allow_uav_condition]
     while (before < BUDGET) {
         uint next = (BUDGET - before <= cost) ? BUDGET : (before + cost);
         uint prev;
-        budget.InterlockedCompareExchange(0, before, next, prev);
+        InterlockedCompareExchange(budget[0], before, next, prev);
         if (prev == before) break;
         before = prev;
     }

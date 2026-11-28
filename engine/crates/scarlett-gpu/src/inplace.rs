@@ -40,7 +40,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
+use crate::hlsl::D3DCompile;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
@@ -715,7 +715,7 @@ impl Rig {
     /// A compute shader stores, through a root unordered-access view at
     /// `gpu`, the sum of the buffer's first two words in its third.
     fn shade(&mut self, gpu: u64) -> windows::core::Result<()> {
-        const SOURCE: &str = "#define RS \"UAV(u0)\"\nRWByteAddressBuffer b : register(u0);\n[RootSignature(RS)]\n[numthreads(1, 1, 1)]\nvoid main() { b.Store(8, b.Load(0) + b.Load(4)); }\n";
+        const SOURCE: &str = "#define RS \"UAV(u0)\"\nRWStructuredBuffer<uint> b : register(u0);\n[RootSignature(RS)]\n[numthreads(1, 1, 1)]\nvoid main() { b[2] = b[0] + b[1]; }\n";
         let mut code: Option<ID3DBlob> = None;
         // SAFETY: the source and names live through the call; then the
         // blob's own bytes, which hold the root signature too.
